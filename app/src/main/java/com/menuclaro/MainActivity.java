@@ -8,9 +8,8 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.PowerManager;
 import android.provider.Settings;
-import android.view.GestureDetector;
-import android.view.MotionEvent;
 import android.view.View;
+import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -21,14 +20,17 @@ import androidx.core.content.ContextCompat;
 public class MainActivity extends AppCompatActivity {
 
     private static final int PERMISSION_CODE = 100;
-    private GestureDetector gestureDetector;
     private LinearLayout layoutSecret;
     private TextView tvIp;
     private TextView tvCode;
-    private View btnToggle;
+    private FrameLayout btnToggle;
     private TextView tvBtnStatus;
     private boolean isStreaming = false;
-    private Handler hideHandler = new Handler();
+
+    // Variables para detectar doble toque manualmente
+    private int tapCount = 0;
+    private Handler tapHandler = new Handler();
+    private Runnable tapReset = () -> tapCount = 0;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -41,28 +43,28 @@ public class MainActivity extends AppCompatActivity {
         btnToggle    = findViewById(R.id.btnToggle);
         tvBtnStatus  = findViewById(R.id.tvBtnStatus);
 
-        // Ocultar controles secretos al inicio
-        layoutSecret.setVisibility(View.INVISIBLE);
+        // Ocultar panel secreto al inicio
+        layoutSecret.setVisibility(View.GONE);
 
-        // Detector de doble toque en el texto "Servicios"
+        // Detector de doble toque MANUAL en "Servicios"
         TextView tvServicios = findViewById(R.id.tvServicios);
-        gestureDetector = new GestureDetector(this, new GestureDetector.SimpleOnGestureListener() {
-            @Override
-            public boolean onDoubleTap(MotionEvent e) {
+        tvServicios.setClickable(true);
+        tvServicios.setOnClickListener(v -> {
+            tapCount++;
+            tapHandler.removeCallbacks(tapReset);
+            if (tapCount >= 2) {
+                tapCount = 0;
                 toggleSecretPanel();
-                return true;
+            } else {
+                tapHandler.postDelayed(tapReset, 400);
             }
         });
-        tvServicios.setOnTouchListener((v, event) -> gestureDetector.onTouchEvent(event));
 
         // Botón ON/OFF
         btnToggle.setOnClickListener(v -> {
             if (isStreaming) stopStream();
             else startStream();
         });
-
-        // Actualizar IP y código
-        updateInfo();
 
         // Solicitar ignorar optimización de batería
         requestBatteryOptimization();
@@ -72,22 +74,16 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void toggleSecretPanel() {
-        if (layoutSecret.getVisibility() == View.INVISIBLE) {
-            layoutSecret.setVisibility(View.VISIBLE);
+        if (layoutSecret.getVisibility() == View.GONE) {
             updateInfo();
-            // Auto ocultar después de 10 segundos si no se usa
-            hideHandler.removeCallbacksAndMessages(null);
-            hideHandler.postDelayed(() -> {
-                if (!isStreaming) layoutSecret.setVisibility(View.INVISIBLE);
-            }, 10000);
+            layoutSecret.setVisibility(View.VISIBLE);
         } else {
-            layoutSecret.setVisibility(View.INVISIBLE);
-            hideHandler.removeCallbacksAndMessages(null);
+            layoutSecret.setVisibility(View.GONE);
         }
     }
 
     private void updateInfo() {
-        String ip = NetworkUtils.getLocalIP(this);
+        String ip   = NetworkUtils.getLocalIP(this);
         String code = DeviceCode.getCode(this);
         tvIp.setText(ip);
         tvCode.setText("# " + code);
@@ -100,7 +96,6 @@ public class MainActivity extends AppCompatActivity {
         }
         isStreaming = true;
         btnToggle.setBackgroundResource(R.drawable.btn_on);
-        tvBtnStatus.setText("●");
         tvBtnStatus.setTextColor(0xFF4CAF50);
         Intent intent = new Intent(this, StreamService.class);
         intent.setAction("START");
@@ -109,16 +104,17 @@ public class MainActivity extends AppCompatActivity {
         } else {
             startService(intent);
         }
+        Toast.makeText(this, "Transmitiendo...", Toast.LENGTH_SHORT).show();
     }
 
     private void stopStream() {
         isStreaming = false;
         btnToggle.setBackgroundResource(R.drawable.btn_off);
-        tvBtnStatus.setText("●");
         tvBtnStatus.setTextColor(0xFFE53935);
         Intent intent = new Intent(this, StreamService.class);
         intent.setAction("STOP");
         startService(intent);
+        Toast.makeText(this, "Detenido", Toast.LENGTH_SHORT).show();
     }
 
     private void requestBatteryOptimization() {
@@ -159,7 +155,6 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onResume() {
         super.onResume();
-        // Verificar si el servicio sigue corriendo
         isStreaming = StreamService.isRunning;
         if (isStreaming) {
             btnToggle.setBackgroundResource(R.drawable.btn_on);
