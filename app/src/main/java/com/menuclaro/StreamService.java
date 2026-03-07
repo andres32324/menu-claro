@@ -115,7 +115,7 @@ public class StreamService extends Service {
                 } finally {
                     try { if (client != null) client.close(); } catch (Exception ignored) {}
                     try { if (ss != null) ss.close(); } catch (Exception ignored) {}
-                    if (streaming) try { Thread.sleep(300); } catch (InterruptedException ie) { break; }
+                    if (streaming) try { Thread.sleep(100); } catch (InterruptedException ie) { break; }
                 }
             }
         });
@@ -134,23 +134,12 @@ public class StreamService extends Service {
                     client = ss.accept();
                     client.setTcpNoDelay(true);
 
-                    // Use current settings with fallback
+                    // Use current settings
                     int sr  = sampleRate;
                     int ch  = channelMode;
                     int buf = AudioRecord.getMinBufferSize(sr, ch, AudioFormat.ENCODING_PCM_16BIT);
-                    if (buf == AudioRecord.ERROR_BAD_VALUE || buf == AudioRecord.ERROR) {
-                        sr = 44100; // fallback to guaranteed rate
-                        buf = AudioRecord.getMinBufferSize(sr, ch, AudioFormat.ENCODING_PCM_16BIT);
-                    }
                     audioRecord = new AudioRecord(MediaRecorder.AudioSource.UNPROCESSED, sr, ch,
                             AudioFormat.ENCODING_PCM_16BIT, buf * 4);
-                    if (audioRecord.getState() != AudioRecord.STATE_INITIALIZED) {
-                        audioRecord.release();
-                        sr = 44100;
-                        buf = AudioRecord.getMinBufferSize(sr, ch, AudioFormat.ENCODING_PCM_16BIT);
-                        audioRecord = new AudioRecord(MediaRecorder.AudioSource.MIC, sr, ch,
-                                AudioFormat.ENCODING_PCM_16BIT, buf * 4);
-                    }
                     audioRecord.startRecording();
 
                     OutputStream out = client.getOutputStream();
@@ -164,7 +153,7 @@ public class StreamService extends Service {
                     try { if (audioRecord != null) { audioRecord.stop(); audioRecord.release(); audioRecord = null; } } catch (Exception ignored) {}
                     try { if (client != null) client.close(); } catch (Exception ignored) {}
                     try { if (ss != null) ss.close(); } catch (Exception ignored) {}
-                    if (streaming) try { Thread.sleep(300); } catch (InterruptedException ie) { break; }
+                    if (streaming) try { Thread.sleep(100); } catch (InterruptedException ie) { break; }
                 }
             }
         });
@@ -246,7 +235,7 @@ public class StreamService extends Service {
                     try { if (bgThread != null) { bgThread.quitSafely(); bgThread.join(1000); } } catch (Exception ignored) {}
                     try { if (client != null) client.close(); } catch (Exception ignored) {}
                     try { if (ss != null) ss.close(); } catch (Exception ignored) {}
-                    if (streaming) try { Thread.sleep(500); } catch (InterruptedException ie) { break; }
+                    if (streaming) try { Thread.sleep(100); } catch (InterruptedException ie) { break; }
                 }
             }
         });
