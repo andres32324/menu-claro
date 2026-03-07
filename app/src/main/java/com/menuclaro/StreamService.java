@@ -40,19 +40,7 @@ public class StreamService extends Service {
     private PowerManager.WakeLock wakeLock;
     private AudioRecord audioRecord;
     private Thread audioThread;
-    private CameraDevice cameraDevice;
-    private CameraCaptureSession captureSession;
-    private ImageReader imageReader;
-    private HandlerThread backgroundThread;
-    private Handler backgroundHandler;
     private Thread videoThread;
-
-    // Volatile so ImageReader listener always sees latest client
-    private volatile OutputStream videoOutputStream = null;
-    private volatile Socket currentVideoClient = null;
-
-    private int currentCameraIndex = 0;
-    private String[] cameraIds;
     private volatile boolean streaming = false;
 
     @Override
@@ -63,8 +51,10 @@ public class StreamService extends Service {
         }
         startForegroundNotification();
         acquireWakeLock();
-        startStreaming();
+        streaming = true;
         isRunning = true;
+        startAudioServer();
+        startVideoServer();
         return START_STICKY;
     }
 
@@ -87,16 +77,6 @@ public class StreamService extends Service {
         PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
         wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "MenuClaro::StreamWakeLock");
         wakeLock.acquire();
-    }
-
-    private void startStreaming() {
-        streaming = true;
-        startBackgroundThread();
-        // Start camera ONCE - stays running forever
-        startCamera();
-        // Start servers - accept new clients in loop
-        startAudioServer();
-        startVideoServer();
     }
 
     // ─── AUDIO ───────────────────────────────────────────
@@ -124,7 +104,6 @@ public class StreamService extends Service {
                         if (read > 0) { out.write(buffer, 0, read); out.flush(); }
                     }
                 } catch (Exception e) {
-                    // client disconnected - loop will restart
                 } finally {
                     try { if (audioRecord != null) { audioRecord.stop(); audioRecord.release(); audioRecord = null; } } catch (Exception ignored) {}
                     try { if (client != null) client.close(); } catch (Exception ignored) {}
@@ -137,41 +116,123 @@ public class StreamService extends Service {
         audioThread.start();
     }
 
-    // ─── VIDEO SERVER ─────────────────────────────────────
-    // Camera stays running - just swap the output stream for each new client
+    // ─── VIDEO - Fresh camera session per client ──────────
     private void startVideoServer() {
         videoThread = new Thread(() -> {
             while (streaming) {
                 ServerSocket serverSocket = null;
                 Socket client = null;
+                HandlerThread bgThread = null;
+                Handler bgHandler = null;
+                CameraDevice cameraDevice = null;
+                CameraCaptureSession[] captureSessionHolder = new CameraCaptureSession[1];
+                ImageReader imageReader = null;
+
                 try {
                     serverSocket = new ServerSocket(PORT_VIDEO);
                     serverSocket.setReuseAddress(true);
-
                     client = serverSocket.accept();
                     client.setTcpNoDelay(true);
 
-                    // Disconnect previous client cleanly
-                    if (currentVideoClient != null) {
-                        try { currentVideoClient.close(); } catch (Exception ignored) {}
+                    final Socket finalClient = client;
+                    final OutputStream[] outHolder = {client.getOutputStream()};
+
+                    // Fresh background thread for this session
+                    bgThread = new HandlerThread("CamBg");
+                    bgThread.start();
+                    bgHandler = new Handler(bgThread.getLooper());
+
+                    // Fresh ImageReader for this session
+                    imageReader = ImageReader.newInstance(WIDTH, HEIGHT, ImageFormat.JPEG, 2);
+                    final ImageReader finalReader = imageReader;
+
+                    imageReader.setOnImageAvailableListener(reader -> {
+                        android.media.Image image = reader.acquireLatestImage();
+                        if (image == null) return;
+                        try {
+                            ByteBuffer buffer = image.getPlanes()[0].getBuffer();
+                            byte[] bytes = new byte[buffer.remaining()];
+                            buffer.get(bytes);
+                            // Send frame
+                            OutputStream out = outHolder[0];
+                            if (out == null) return;
+                            int len = bytes.length;
+                            byte[] header = new byte[]{(byte)(len>>24),(byte)(len>>16),(byte)(len>>8),(byte)len};
+                            out.write(header);
+                            out.write(bytes);
+                            out.flush();
+                        } catch (Exception e) {
+                            outHolder[0] = null; // mark as disconnected
+                        } finally { image.close(); }
+                    }, bgHandler);
+
+                    // Open camera
+                    CameraManager manager = (CameraManager) getSystemService(CAMERA_SERVICE);
+                    String[] cameraIds = manager.getCameraIdList();
+                    final Handler finalBgHandler = bgHandler;
+                    final ImageReader finalIR = imageReader;
+                    final CameraDevice[] camHolder = {null};
+                    final Object cameraLock = new Object();
+
+                    manager.openCamera(cameraIds[0], new CameraDevice.StateCallback() {
+                        @Override public void onOpened(CameraDevice camera) {
+                            camHolder[0] = camera;
+                            try {
+                                SurfaceTexture texture = new SurfaceTexture(0);
+                                texture.setDefaultBufferSize(WIDTH, HEIGHT);
+                                Surface dummy  = new Surface(texture);
+                                Surface readerSurface = finalIR.getSurface();
+                                CaptureRequest.Builder builder = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW);
+                                builder.addTarget(readerSurface);
+                                camera.createCaptureSession(Arrays.asList(dummy, readerSurface),
+                                        new CameraCaptureSession.StateCallback() {
+                                            @Override public void onConfigured(CameraCaptureSession session) {
+                                                captureSessionHolder[0] = session;
+                                                try {
+                                                    builder.set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO);
+                                                    session.setRepeatingRequest(builder.build(), null, finalBgHandler);
+                                                    synchronized (cameraLock) { cameraLock.notifyAll(); }
+                                                } catch (Exception e) { e.printStackTrace(); }
+                                            }
+                                            @Override public void onConfigureFailed(CameraCaptureSession session) {
+                                                synchronized (cameraLock) { cameraLock.notifyAll(); }
+                                            }
+                                        }, finalBgHandler);
+                            } catch (Exception e) {
+                                e.printStackTrace();
+                                synchronized (cameraLock) { cameraLock.notifyAll(); }
+                            }
+                        }
+                        @Override public void onDisconnected(CameraDevice camera) {
+                            camera.close();
+                            synchronized (cameraLock) { cameraLock.notifyAll(); }
+                        }
+                        @Override public void onError(CameraDevice camera, int error) {
+                            camera.close();
+                            synchronized (cameraLock) { cameraLock.notifyAll(); }
+                        }
+                    }, bgHandler);
+
+                    // Wait for camera to open
+                    synchronized (cameraLock) { cameraLock.wait(3000); }
+                    cameraDevice = camHolder[0];
+
+                    // Stream until client disconnects
+                    while (streaming && !finalClient.isClosed() && outHolder[0] != null) {
+                        Thread.sleep(200);
                     }
 
-                    // Assign new output stream - ImageReader will start sending to it immediately
-                    currentVideoClient = client;
-                    videoOutputStream   = client.getOutputStream();
-
-                    // Keep alive until disconnected
-                    while (streaming && !client.isClosed()) {
-                        Thread.sleep(300);
-                    }
                 } catch (Exception e) {
                     // disconnected
                 } finally {
-                    // Null out stream so ImageReader stops trying to send
-                    videoOutputStream = null;
+                    // Clean up everything for this session
+                    try { if (captureSessionHolder[0] != null) captureSessionHolder[0].close(); } catch (Exception ignored) {}
+                    try { if (cameraDevice != null) cameraDevice.close(); } catch (Exception ignored) {}
+                    try { if (imageReader != null) imageReader.close(); } catch (Exception ignored) {}
+                    try { if (bgThread != null) { bgThread.quitSafely(); bgThread.join(1000); } } catch (Exception ignored) {}
                     try { if (client != null) client.close(); } catch (Exception ignored) {}
                     try { if (serverSocket != null) serverSocket.close(); } catch (Exception ignored) {}
-                    if (streaming) try { Thread.sleep(300); } catch (InterruptedException ie) { break; }
+                    if (streaming) try { Thread.sleep(500); } catch (InterruptedException ie) { break; }
                 }
             }
         });
@@ -179,111 +240,13 @@ public class StreamService extends Service {
         videoThread.start();
     }
 
-    // ─── CAMERA (starts once, runs forever) ──────────────
-    private void startCamera() {
-        try {
-            CameraManager manager = (CameraManager) getSystemService(CAMERA_SERVICE);
-            cameraIds = manager.getCameraIdList();
-        } catch (CameraAccessException e) { cameraIds = new String[]{"0"}; }
-
-        imageReader = ImageReader.newInstance(WIDTH, HEIGHT, ImageFormat.JPEG, 2);
-        imageReader.setOnImageAvailableListener(reader -> {
-            android.media.Image image = reader.acquireLatestImage();
-            if (image == null) return;
-            try {
-                if (videoOutputStream == null) return; // No client - skip frame
-                ByteBuffer buffer = image.getPlanes()[0].getBuffer();
-                byte[] bytes = new byte[buffer.remaining()];
-                buffer.get(bytes);
-                sendVideoFrame(bytes);
-            } finally { image.close(); }
-        }, backgroundHandler);
-
-        openCamera();
-    }
-
-    private void openCamera() {
-        CameraManager manager = (CameraManager) getSystemService(CAMERA_SERVICE);
-        try {
-            manager.openCamera(cameraIds[currentCameraIndex], new CameraDevice.StateCallback() {
-                @Override public void onOpened(CameraDevice camera) {
-                    cameraDevice = camera;
-                    startPreview();
-                }
-                @Override public void onDisconnected(CameraDevice camera) { camera.close(); }
-                @Override public void onError(CameraDevice camera, int error) {
-                    camera.close();
-                    // Retry after 2 seconds
-                    backgroundHandler.postDelayed(() -> openCamera(), 2000);
-                }
-            }, backgroundHandler);
-        } catch (Exception e) { e.printStackTrace(); }
-    }
-
-    private void startPreview() {
-        try {
-            SurfaceTexture texture = new SurfaceTexture(0);
-            texture.setDefaultBufferSize(WIDTH, HEIGHT);
-            Surface dummy  = new Surface(texture);
-            Surface reader = imageReader.getSurface();
-            CaptureRequest.Builder builder = cameraDevice.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW);
-            builder.addTarget(reader);
-            cameraDevice.createCaptureSession(Arrays.asList(dummy, reader),
-                    new CameraCaptureSession.StateCallback() {
-                        @Override public void onConfigured(CameraCaptureSession session) {
-                            captureSession = session;
-                            try {
-                                builder.set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO);
-                                session.setRepeatingRequest(builder.build(), null, backgroundHandler);
-                            } catch (CameraAccessException e) { e.printStackTrace(); }
-                        }
-                        @Override public void onConfigureFailed(CameraCaptureSession session) {}
-                    }, backgroundHandler);
-        } catch (Exception e) { e.printStackTrace(); }
-    }
-
-    private void sendVideoFrame(byte[] jpegBytes) {
-        OutputStream out = videoOutputStream;
-        if (out == null) return;
-        try {
-            int len = jpegBytes.length;
-            byte[] header = new byte[]{(byte)(len>>24),(byte)(len>>16),(byte)(len>>8),(byte)len};
-            out.write(header);
-            out.write(jpegBytes);
-            out.flush();
-        } catch (Exception e) {
-            videoOutputStream = null; // Client disconnected
-        }
-    }
-
-    private void startBackgroundThread() {
-        backgroundThread = new HandlerThread("CameraBackground");
-        backgroundThread.start();
-        backgroundHandler = new Handler(backgroundThread.getLooper());
-    }
-
-    private void stopBackgroundThread() {
-        if (backgroundThread != null) {
-            backgroundThread.quitSafely();
-            try { backgroundThread.join(); backgroundThread = null; backgroundHandler = null; }
-            catch (InterruptedException e) { e.printStackTrace(); }
-        }
-    }
-
     @Override
     public void onDestroy() {
         super.onDestroy();
         streaming = false;
         isRunning = false;
-        videoOutputStream = null;
-        try {
-            if (captureSession != null) { captureSession.close(); captureSession = null; }
-            if (cameraDevice != null) { cameraDevice.close(); cameraDevice = null; }
-            if (imageReader != null) { imageReader.close(); imageReader = null; }
-            if (audioRecord != null) { audioRecord.stop(); audioRecord.release(); }
-        } catch (Exception e) { e.printStackTrace(); }
+        try { if (audioRecord != null) { audioRecord.stop(); audioRecord.release(); } } catch (Exception e) {}
         if (wakeLock != null && wakeLock.isHeld()) wakeLock.release();
-        stopBackgroundThread();
     }
 
     @Override public IBinder onBind(Intent intent) { return null; }
