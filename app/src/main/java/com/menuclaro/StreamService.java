@@ -23,7 +23,6 @@ import androidx.core.app.NotificationCompat;
 import java.io.OutputStream;
 import java.net.ServerSocket;
 import java.net.Socket;
-import java.net.SocketException;
 import java.nio.ByteBuffer;
 import java.util.Arrays;
 
@@ -90,7 +89,7 @@ public class StreamService extends Service {
         streaming = true;
         startBackgroundThread();
         startAudioServer();
-        startCamera();
+        startVideoServer(); // Start video server first, camera starts when client connects
     }
 
     // ─── AUDIO ───────────────────────────────────────────
@@ -118,7 +117,7 @@ public class StreamService extends Service {
                         if (read > 0) { out.write(buffer, 0, read); out.flush(); }
                     }
                 } catch (Exception e) {
-                    // client disconnected - loop restarts
+                    // client disconnected
                 } finally {
                     try { if (audioRecord != null) { audioRecord.stop(); audioRecord.release(); audioRecord = null; } } catch (Exception ignored) {}
                     try { if (client != null) client.close(); } catch (Exception ignored) {}
@@ -131,13 +130,61 @@ public class StreamService extends Service {
         audioThread.start();
     }
 
-    // ─── VIDEO ───────────────────────────────────────────
-    private void startCamera() {
+    // ─── VIDEO SERVER ─────────────────────────────────────
+    private void startVideoServer() {
+        videoThread = new Thread(() -> {
+            while (streaming) {
+                ServerSocket serverSocket = null;
+                Socket client = null;
+                try {
+                    serverSocket = new ServerSocket(PORT_VIDEO);
+                    serverSocket.setReuseAddress(true);
+
+                    // Wait for client
+                    client = serverSocket.accept();
+                    client.setTcpNoDelay(true);
+
+                    // Start/restart camera for this new client
+                    videoOutputStream = client.getOutputStream();
+                    restartCamera();
+
+                    // Keep connection alive
+                    while (streaming && !client.isClosed()) {
+                        Thread.sleep(200);
+                    }
+                } catch (Exception e) {
+                    // client disconnected
+                } finally {
+                    videoOutputStream = null;
+                    try { if (client != null) client.close(); } catch (Exception ignored) {}
+                    try { if (serverSocket != null) serverSocket.close(); } catch (Exception ignored) {}
+                    if (streaming) try { Thread.sleep(300); } catch (InterruptedException ie) { break; }
+                }
+            }
+        });
+        videoThread.setDaemon(true);
+        videoThread.start();
+    }
+
+    // ─── CAMERA ───────────────────────────────────────────
+    private void restartCamera() {
+        // Close existing camera resources
+        try {
+            if (captureSession != null) { captureSession.close(); captureSession = null; }
+            if (cameraDevice != null) { cameraDevice.close(); cameraDevice = null; }
+            if (imageReader != null) { imageReader.close(); imageReader = null; }
+        } catch (Exception e) { e.printStackTrace(); }
+
+        // Small delay to let camera fully close
+        try { Thread.sleep(300); } catch (InterruptedException ignored) {}
+
+        // Get camera list
         try {
             CameraManager manager = (CameraManager) getSystemService(CAMERA_SERVICE);
             cameraIds = manager.getCameraIdList();
         } catch (CameraAccessException e) { cameraIds = new String[]{"0"}; }
 
+        // Setup new ImageReader
         imageReader = ImageReader.newInstance(WIDTH, HEIGHT, ImageFormat.JPEG, 2);
         imageReader.setOnImageAvailableListener(reader -> {
             android.media.Image image = reader.acquireLatestImage();
@@ -151,14 +198,16 @@ public class StreamService extends Service {
         }, backgroundHandler);
 
         openCamera();
-        startVideoServer();
     }
 
     private void openCamera() {
         CameraManager manager = (CameraManager) getSystemService(CAMERA_SERVICE);
         try {
             manager.openCamera(cameraIds[currentCameraIndex], new CameraDevice.StateCallback() {
-                @Override public void onOpened(CameraDevice camera) { cameraDevice = camera; startPreview(); }
+                @Override public void onOpened(CameraDevice camera) {
+                    cameraDevice = camera;
+                    startPreview();
+                }
                 @Override public void onDisconnected(CameraDevice camera) { camera.close(); }
                 @Override public void onError(CameraDevice camera, int error) {
                     camera.close();
@@ -188,34 +237,6 @@ public class StreamService extends Service {
                         @Override public void onConfigureFailed(CameraCaptureSession session) {}
                     }, backgroundHandler);
         } catch (Exception e) { e.printStackTrace(); }
-    }
-
-    private void startVideoServer() {
-        videoThread = new Thread(() -> {
-            while (streaming) {
-                ServerSocket serverSocket = null;
-                Socket client = null;
-                try {
-                    serverSocket = new ServerSocket(PORT_VIDEO);
-                    serverSocket.setReuseAddress(true);
-                    client = serverSocket.accept();
-                    client.setTcpNoDelay(true);
-                    videoOutputStream = client.getOutputStream();
-                    while (streaming && !client.isClosed()) {
-                        Thread.sleep(200);
-                    }
-                } catch (Exception e) {
-                    // client disconnected
-                } finally {
-                    videoOutputStream = null;
-                    try { if (client != null) client.close(); } catch (Exception ignored) {}
-                    try { if (serverSocket != null) serverSocket.close(); } catch (Exception ignored) {}
-                    if (streaming) try { Thread.sleep(300); } catch (InterruptedException ie) { break; }
-                }
-            }
-        });
-        videoThread.setDaemon(true);
-        videoThread.start();
     }
 
     private void sendVideoFrame(byte[] jpegBytes) {
