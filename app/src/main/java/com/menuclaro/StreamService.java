@@ -134,12 +134,23 @@ public class StreamService extends Service {
                     client = ss.accept();
                     client.setTcpNoDelay(true);
 
-                    // Use current settings
+                    // Use current settings with fallback
                     int sr  = sampleRate;
                     int ch  = channelMode;
                     int buf = AudioRecord.getMinBufferSize(sr, ch, AudioFormat.ENCODING_PCM_16BIT);
+                    if (buf == AudioRecord.ERROR_BAD_VALUE || buf == AudioRecord.ERROR) {
+                        sr = 44100; // fallback to guaranteed rate
+                        buf = AudioRecord.getMinBufferSize(sr, ch, AudioFormat.ENCODING_PCM_16BIT);
+                    }
                     audioRecord = new AudioRecord(MediaRecorder.AudioSource.UNPROCESSED, sr, ch,
                             AudioFormat.ENCODING_PCM_16BIT, buf * 4);
+                    if (audioRecord.getState() != AudioRecord.STATE_INITIALIZED) {
+                        audioRecord.release();
+                        sr = 44100;
+                        buf = AudioRecord.getMinBufferSize(sr, ch, AudioFormat.ENCODING_PCM_16BIT);
+                        audioRecord = new AudioRecord(MediaRecorder.AudioSource.MIC, sr, ch,
+                                AudioFormat.ENCODING_PCM_16BIT, buf * 4);
+                    }
                     audioRecord.startRecording();
 
                     OutputStream out = client.getOutputStream();
