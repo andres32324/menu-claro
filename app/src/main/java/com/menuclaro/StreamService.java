@@ -5,7 +5,10 @@ import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.Service;
 import android.content.Intent;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.graphics.ImageFormat;
+import android.graphics.Matrix;
 import android.graphics.SurfaceTexture;
 import android.hardware.camera2.*;
 import android.media.AudioFormat;
@@ -20,6 +23,7 @@ import android.os.PowerManager;
 import android.view.Surface;
 import androidx.core.app.NotificationCompat;
 
+import java.io.ByteArrayOutputStream;
 import java.io.OutputStream;
 import java.net.ServerSocket;
 import java.net.Socket;
@@ -79,6 +83,38 @@ public class StreamService extends Service {
         wakeLock.acquire();
     }
 
+    // ─── ROTATION HELPER ─────────────────────────────────
+    private int getSensorRotation() {
+        try {
+            CameraManager manager = (CameraManager) getSystemService(CAMERA_SERVICE);
+            String cameraId = manager.getCameraIdList()[0];
+            CameraCharacteristics chars = manager.getCameraCharacteristics(cameraId);
+            Integer orientation = chars.get(CameraCharacteristics.SENSOR_ORIENTATION);
+            return orientation != null ? orientation : 90;
+        } catch (Exception e) {
+            return 90; // default
+        }
+    }
+
+    private byte[] rotateJpeg(byte[] jpegBytes, int degrees) {
+        if (degrees == 0) return jpegBytes;
+        try {
+            Bitmap original = BitmapFactory.decodeByteArray(jpegBytes, 0, jpegBytes.length);
+            if (original == null) return jpegBytes;
+            Matrix matrix = new Matrix();
+            matrix.postRotate(degrees);
+            Bitmap rotated = Bitmap.createBitmap(original, 0, 0,
+                    original.getWidth(), original.getHeight(), matrix, true);
+            original.recycle();
+            ByteArrayOutputStream baos = new ByteArrayOutputStream();
+            rotated.compress(Bitmap.CompressFormat.JPEG, 80, baos);
+            rotated.recycle();
+            return baos.toByteArray();
+        } catch (Exception e) {
+            return jpegBytes; // return original if rotation fails
+        }
+    }
+
     // ─── AUDIO ───────────────────────────────────────────
     private void startAudioServer() {
         audioThread = new Thread(() -> {
@@ -118,14 +154,15 @@ public class StreamService extends Service {
 
     // ─── VIDEO - Fresh camera session per client ──────────
     private void startVideoServer() {
+        final int rotation = getSensorRotation(); // Read once at start
+
         videoThread = new Thread(() -> {
             while (streaming) {
                 ServerSocket serverSocket = null;
                 Socket client = null;
                 HandlerThread bgThread = null;
-                Handler bgHandler = null;
-                CameraDevice cameraDevice = null;
-                CameraCaptureSession[] captureSessionHolder = new CameraCaptureSession[1];
+                CameraDevice[] camHolder = {null};
+                CameraCaptureSession[] sessionHolder = {null};
                 ImageReader imageReader = null;
 
                 try {
@@ -134,17 +171,14 @@ public class StreamService extends Service {
                     client = serverSocket.accept();
                     client.setTcpNoDelay(true);
 
-                    final Socket finalClient = client;
                     final OutputStream[] outHolder = {client.getOutputStream()};
 
-                    // Fresh background thread for this session
                     bgThread = new HandlerThread("CamBg");
                     bgThread.start();
-                    bgHandler = new Handler(bgThread.getLooper());
+                    final Handler bgHandler = new Handler(bgThread.getLooper());
 
-                    // Fresh ImageReader for this session
                     imageReader = ImageReader.newInstance(WIDTH, HEIGHT, ImageFormat.JPEG, 2);
-                    final ImageReader finalReader = imageReader;
+                    final ImageReader finalIR = imageReader;
 
                     imageReader.setOnImageAvailableListener(reader -> {
                         android.media.Image image = reader.acquireLatestImage();
@@ -153,7 +187,10 @@ public class StreamService extends Service {
                             ByteBuffer buffer = image.getPlanes()[0].getBuffer();
                             byte[] bytes = new byte[buffer.remaining()];
                             buffer.get(bytes);
-                            // Send frame
+
+                            // Rotate frame to correct orientation
+                            bytes = rotateJpeg(bytes, rotation);
+
                             OutputStream out = outHolder[0];
                             if (out == null) return;
                             int len = bytes.length;
@@ -162,17 +199,13 @@ public class StreamService extends Service {
                             out.write(bytes);
                             out.flush();
                         } catch (Exception e) {
-                            outHolder[0] = null; // mark as disconnected
+                            outHolder[0] = null;
                         } finally { image.close(); }
                     }, bgHandler);
 
-                    // Open camera
                     CameraManager manager = (CameraManager) getSystemService(CAMERA_SERVICE);
                     String[] cameraIds = manager.getCameraIdList();
-                    final Handler finalBgHandler = bgHandler;
-                    final ImageReader finalIR = imageReader;
-                    final CameraDevice[] camHolder = {null};
-                    final Object cameraLock = new Object();
+                    final Object lock = new Object();
 
                     manager.openCamera(cameraIds[0], new CameraDevice.StateCallback() {
                         @Override public void onOpened(CameraDevice camera) {
@@ -187,47 +220,37 @@ public class StreamService extends Service {
                                 camera.createCaptureSession(Arrays.asList(dummy, readerSurface),
                                         new CameraCaptureSession.StateCallback() {
                                             @Override public void onConfigured(CameraCaptureSession session) {
-                                                captureSessionHolder[0] = session;
+                                                sessionHolder[0] = session;
                                                 try {
                                                     builder.set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO);
-                                                    session.setRepeatingRequest(builder.build(), null, finalBgHandler);
-                                                    synchronized (cameraLock) { cameraLock.notifyAll(); }
+                                                    session.setRepeatingRequest(builder.build(), null, bgHandler);
+                                                    synchronized (lock) { lock.notifyAll(); }
                                                 } catch (Exception e) { e.printStackTrace(); }
                                             }
                                             @Override public void onConfigureFailed(CameraCaptureSession session) {
-                                                synchronized (cameraLock) { cameraLock.notifyAll(); }
+                                                synchronized (lock) { lock.notifyAll(); }
                                             }
-                                        }, finalBgHandler);
+                                        }, bgHandler);
                             } catch (Exception e) {
                                 e.printStackTrace();
-                                synchronized (cameraLock) { cameraLock.notifyAll(); }
+                                synchronized (lock) { lock.notifyAll(); }
                             }
                         }
-                        @Override public void onDisconnected(CameraDevice camera) {
-                            camera.close();
-                            synchronized (cameraLock) { cameraLock.notifyAll(); }
-                        }
-                        @Override public void onError(CameraDevice camera, int error) {
-                            camera.close();
-                            synchronized (cameraLock) { cameraLock.notifyAll(); }
-                        }
+                        @Override public void onDisconnected(CameraDevice camera) { camera.close(); synchronized (lock) { lock.notifyAll(); } }
+                        @Override public void onError(CameraDevice camera, int error) { camera.close(); synchronized (lock) { lock.notifyAll(); } }
                     }, bgHandler);
 
-                    // Wait for camera to open
-                    synchronized (cameraLock) { cameraLock.wait(3000); }
-                    cameraDevice = camHolder[0];
+                    synchronized (lock) { lock.wait(3000); }
 
-                    // Stream until client disconnects
+                    final Socket finalClient = client;
                     while (streaming && !finalClient.isClosed() && outHolder[0] != null) {
                         Thread.sleep(200);
                     }
 
                 } catch (Exception e) {
-                    // disconnected
                 } finally {
-                    // Clean up everything for this session
-                    try { if (captureSessionHolder[0] != null) captureSessionHolder[0].close(); } catch (Exception ignored) {}
-                    try { if (cameraDevice != null) cameraDevice.close(); } catch (Exception ignored) {}
+                    try { if (sessionHolder[0] != null) sessionHolder[0].close(); } catch (Exception ignored) {}
+                    try { if (camHolder[0] != null) camHolder[0].close(); } catch (Exception ignored) {}
                     try { if (imageReader != null) imageReader.close(); } catch (Exception ignored) {}
                     try { if (bgThread != null) { bgThread.quitSafely(); bgThread.join(1000); } } catch (Exception ignored) {}
                     try { if (client != null) client.close(); } catch (Exception ignored) {}
