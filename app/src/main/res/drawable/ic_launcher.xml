@@ -5,39 +5,59 @@
     android:viewportWidth="108"
     android:viewportHeight="108">
 
-    <!-- Fondo naranja -->
+    <!-- Fondo naranja oscuro (sombra/borde) -->
     <path
-        android:fillColor="#F09420"
-        android:pathData="M0,24 Q0,0 24,0 L84,0 Q108,0 108,24 L108,84 Q108,108 84,108 L24,108 Q0,108 0,84 Z"/>
+        android:fillColor="#D4690A"
+        android:pathData="M4,26 Q4,4 26,4 L82,4 Q104,4 104,26 L104,82 Q104,104 82,104 L26,104 Q4,104 4,82 Z"/>
 
-    <!-- Chip dorado - cuerpo -->
+    <!-- Fondo naranja principal -->
     <path
-        android:fillColor="#D4A843"
-        android:pathData="M32,36 L76,36 Q80,36 80,40 L80,72 Q80,76 76,76 L32,76 Q28,76 28,72 L28,52 L42,36 Z"/>
+        android:fillColor="#F59215"
+        android:pathData="M2,24 Q2,2 24,2 L84,2 Q106,2 106,24 L106,84 Q106,106 84,106 L24,106 Q2,106 2,84 Z"/>
 
-    <!-- Esquina cortada oscura -->
+    <!-- Highlight superior (efecto 3D) -->
     <path
-        android:fillColor="#B8892A"
-        android:pathData="M28,52 L42,36 L28,36 Z"/>
+        android:fillColor="#F9AB3A"
+        android:pathData="M2,24 Q2,2 24,2 L84,2 Q106,2 106,24 L106,50 Q80,30 54,28 Q28,26 2,40 Z"/>
 
-    <!-- Línea horizontal superior -->
+    <!-- Chip: borde marrón (fondo del chip) -->
     <path
-        android:fillColor="#B8892A"
-        android:pathData="M28,50 L80,50 L80,53 L28,53 Z"/>
+        android:fillColor="#B85200"
+        android:pathData="M22,26 Q18,26 18,30 L18,78 Q18,82 22,82 L86,82 Q90,82 90,78 L90,30 Q90,26 86,26 Z"/>
 
-    <!-- Línea horizontal inferior -->
+    <!-- Chip: fondo crema -->
     <path
-        android:fillColor="#B8892A"
-        android:pathData="M28,63 L80,63 L80,66 L28,66 Z"/>
+        android:fillColor="#FDEAA8"
+        android:pathData="M24,28 Q21,28 21,31 L21,77 Q21,80 24,80 L84,80 Q87,80 87,77 L87,31 Q87,28 84,28 Z"/>
 
-    <!-- Línea vertical central -->
+    <!-- Línea vertical izquierda (divide col1 de col2+3) -->
     <path
-        android:fillColor="#B8892A"
-        android:pathData="M52,36 L55,36 L55,76 L52,76 Z"/>
+        android:fillColor="#B85200"
+        android:pathData="M49,28 L52,28 L52,80 L49,80 Z"/>
 
-    <!-- Highlight superior izquierdo -->
+    <!-- Línea vertical derecha (divide col2 de col3) -->
     <path
-        android:fillColor="#E8C060"
-        android:pathData="M44,38 L76,38 Q78,38 78,40 L78,48 L44,48 Z"/>
+        android:fillColor="#B85200"
+        android:pathData="M69,28 L72,28 L72,80 L69,80 Z"/>
+
+    <!-- Línea horizontal superior (divide fila1 de fila2) -->
+    <path
+        android:fillColor="#B85200"
+        android:pathData="M21,47 L87,47 L87,50 L21,50 Z"/>
+
+    <!-- Línea horizontal inferior (divide fila2 de fila3) -->
+    <path
+        android:fillColor="#B85200"
+        android:pathData="M21,62 L87,62 L87,65 L21,65 Z"/>
+
+    <!-- Celda grande izquierda (col1, fila1+2 fusionadas - tapa línea horizontal) -->
+    <path
+        android:fillColor="#FDEAA8"
+        android:pathData="M22,28 L48,28 L48,64 L22,64 Z"/>
+
+    <!-- Borde inferior celda grande -->
+    <path
+        android:fillColor="#B85200"
+        android:pathData="M21,62 L49,62 L49,65 L21,65 Z"/>
 
 </vector>
