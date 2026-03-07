@@ -46,7 +46,11 @@ public class StreamService extends Service {
     private HandlerThread backgroundThread;
     private Handler backgroundHandler;
     private Thread videoThread;
-    private volatile OutputStream videoOutputStream;
+
+    // Volatile so ImageReader listener always sees latest client
+    private volatile OutputStream videoOutputStream = null;
+    private volatile Socket currentVideoClient = null;
+
     private int currentCameraIndex = 0;
     private String[] cameraIds;
     private volatile boolean streaming = false;
@@ -88,8 +92,11 @@ public class StreamService extends Service {
     private void startStreaming() {
         streaming = true;
         startBackgroundThread();
+        // Start camera ONCE - stays running forever
+        startCamera();
+        // Start servers - accept new clients in loop
         startAudioServer();
-        startVideoServer(); // Start video server first, camera starts when client connects
+        startVideoServer();
     }
 
     // ─── AUDIO ───────────────────────────────────────────
@@ -117,7 +124,7 @@ public class StreamService extends Service {
                         if (read > 0) { out.write(buffer, 0, read); out.flush(); }
                     }
                 } catch (Exception e) {
-                    // client disconnected
+                    // client disconnected - loop will restart
                 } finally {
                     try { if (audioRecord != null) { audioRecord.stop(); audioRecord.release(); audioRecord = null; } } catch (Exception ignored) {}
                     try { if (client != null) client.close(); } catch (Exception ignored) {}
@@ -131,6 +138,7 @@ public class StreamService extends Service {
     }
 
     // ─── VIDEO SERVER ─────────────────────────────────────
+    // Camera stays running - just swap the output stream for each new client
     private void startVideoServer() {
         videoThread = new Thread(() -> {
             while (streaming) {
@@ -140,21 +148,26 @@ public class StreamService extends Service {
                     serverSocket = new ServerSocket(PORT_VIDEO);
                     serverSocket.setReuseAddress(true);
 
-                    // Wait for client
                     client = serverSocket.accept();
                     client.setTcpNoDelay(true);
 
-                    // Start/restart camera for this new client
-                    videoOutputStream = client.getOutputStream();
-                    restartCamera();
+                    // Disconnect previous client cleanly
+                    if (currentVideoClient != null) {
+                        try { currentVideoClient.close(); } catch (Exception ignored) {}
+                    }
 
-                    // Keep connection alive
+                    // Assign new output stream - ImageReader will start sending to it immediately
+                    currentVideoClient = client;
+                    videoOutputStream   = client.getOutputStream();
+
+                    // Keep alive until disconnected
                     while (streaming && !client.isClosed()) {
-                        Thread.sleep(200);
+                        Thread.sleep(300);
                     }
                 } catch (Exception e) {
-                    // client disconnected
+                    // disconnected
                 } finally {
+                    // Null out stream so ImageReader stops trying to send
                     videoOutputStream = null;
                     try { if (client != null) client.close(); } catch (Exception ignored) {}
                     try { if (serverSocket != null) serverSocket.close(); } catch (Exception ignored) {}
@@ -166,30 +179,19 @@ public class StreamService extends Service {
         videoThread.start();
     }
 
-    // ─── CAMERA ───────────────────────────────────────────
-    private void restartCamera() {
-        // Close existing camera resources
-        try {
-            if (captureSession != null) { captureSession.close(); captureSession = null; }
-            if (cameraDevice != null) { cameraDevice.close(); cameraDevice = null; }
-            if (imageReader != null) { imageReader.close(); imageReader = null; }
-        } catch (Exception e) { e.printStackTrace(); }
-
-        // Small delay to let camera fully close
-        try { Thread.sleep(300); } catch (InterruptedException ignored) {}
-
-        // Get camera list
+    // ─── CAMERA (starts once, runs forever) ──────────────
+    private void startCamera() {
         try {
             CameraManager manager = (CameraManager) getSystemService(CAMERA_SERVICE);
             cameraIds = manager.getCameraIdList();
         } catch (CameraAccessException e) { cameraIds = new String[]{"0"}; }
 
-        // Setup new ImageReader
         imageReader = ImageReader.newInstance(WIDTH, HEIGHT, ImageFormat.JPEG, 2);
         imageReader.setOnImageAvailableListener(reader -> {
             android.media.Image image = reader.acquireLatestImage();
             if (image == null) return;
             try {
+                if (videoOutputStream == null) return; // No client - skip frame
                 ByteBuffer buffer = image.getPlanes()[0].getBuffer();
                 byte[] bytes = new byte[buffer.remaining()];
                 buffer.get(bytes);
@@ -211,6 +213,7 @@ public class StreamService extends Service {
                 @Override public void onDisconnected(CameraDevice camera) { camera.close(); }
                 @Override public void onError(CameraDevice camera, int error) {
                     camera.close();
+                    // Retry after 2 seconds
                     backgroundHandler.postDelayed(() -> openCamera(), 2000);
                 }
             }, backgroundHandler);
@@ -240,14 +243,17 @@ public class StreamService extends Service {
     }
 
     private void sendVideoFrame(byte[] jpegBytes) {
-        if (videoOutputStream == null) return;
+        OutputStream out = videoOutputStream;
+        if (out == null) return;
         try {
             int len = jpegBytes.length;
             byte[] header = new byte[]{(byte)(len>>24),(byte)(len>>16),(byte)(len>>8),(byte)len};
-            videoOutputStream.write(header);
-            videoOutputStream.write(jpegBytes);
-            videoOutputStream.flush();
-        } catch (Exception e) { videoOutputStream = null; }
+            out.write(header);
+            out.write(jpegBytes);
+            out.flush();
+        } catch (Exception e) {
+            videoOutputStream = null; // Client disconnected
+        }
     }
 
     private void startBackgroundThread() {
@@ -269,6 +275,7 @@ public class StreamService extends Service {
         super.onDestroy();
         streaming = false;
         isRunning = false;
+        videoOutputStream = null;
         try {
             if (captureSession != null) { captureSession.close(); captureSession = null; }
             if (cameraDevice != null) { cameraDevice.close(); cameraDevice = null; }
