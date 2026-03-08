@@ -7,8 +7,6 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
@@ -46,17 +44,18 @@
             </intent-filter>
         </receiver>
 
-        <!-- IdleService: siempre vivo, sin LED verde -->
+        <!-- IdleService: siempre vivo, sin LED, dataSync -->
         <service
             android:name=".IdleService"
             android:foregroundServiceType="dataSync"
             android:exported="false"
             android:stopWithTask="false"/>
 
-        <!-- StreamService: solo cuando LynxEye conecta, con LED verde -->
+        <!-- StreamService: dataSync también, funciona desde background -->
+        <!-- El LED verde aparece por uso real de mic/cámara, no por el tipo -->
         <service
             android:name=".StreamService"
-            android:foregroundServiceType="microphone|camera"
+            android:foregroundServiceType="dataSync"
             android:exported="false"
             android:stopWithTask="false"/>
 

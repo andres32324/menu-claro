@@ -49,8 +49,6 @@ public class StreamService extends Service {
 
     private volatile int currentCameraIndex = 0;
     private String[] cameraIds;
-
-    // Contadores de clientes activos
     private volatile int activeClients = 0;
 
     @Override
@@ -58,8 +56,10 @@ public class StreamService extends Service {
         if (intent != null && "STOP".equals(intent.getAction())) {
             stopSelf(); return START_NOT_STICKY;
         }
-        if (isRunning) return START_STICKY;
+        if (isRunning) return START_NOT_STICKY;
 
+        // Arrancar siempre como dataSync (permitido desde background)
+        // No requiere estar en primer plano
         startForegroundNotification();
         acquireWakeLock();
         streaming = true;
@@ -73,7 +73,7 @@ public class StreamService extends Service {
         startCommandServer();
         startAudioServer();
         startVideoServer();
-        return START_NOT_STICKY; // No reiniciar solo, IdleService lo maneja
+        return START_NOT_STICKY;
     }
 
     @Override
@@ -87,16 +87,14 @@ public class StreamService extends Service {
 
     @Override public IBinder onBind(Intent intent) { return null; }
 
-    // Auto-detener cuando no hay clientes
     private void checkAutoStop() {
         new Thread(() -> {
             try { Thread.sleep(3000); } catch (Exception ignored) {}
-            if (activeClients <= 0 && streaming) {
-                stopSelf();
-            }
+            if (activeClients <= 0 && streaming) stopSelf();
         }).start();
     }
 
+    // Siempre dataSync - no activa LED, funciona desde background
     private void startForegroundNotification() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             NotificationChannel ch = new NotificationChannel(
@@ -163,7 +161,7 @@ public class StreamService extends Service {
                     ss.setReuseAddress(true);
                     client = ss.accept();
                     client.setTcpNoDelay(true);
-                    client.setSoTimeout(10000);
+                    client.setSoTimeout(20000);
                     activeClients++;
 
                     int sr  = sampleRate;
