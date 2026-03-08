@@ -54,9 +54,9 @@ public class StreamService extends Service {
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         if (intent != null && "STOP".equals(intent.getAction())) {
-            stopSelf(); return START_NOT_STICKY;
+            stopSelf(); return START_STICKY;
         }
-        if (isRunning) return START_NOT_STICKY;
+        if (isRunning) return START_STICKY;
 
         // Arrancar siempre como dataSync (permitido desde background)
         // No requiere estar en primer plano
@@ -73,7 +73,7 @@ public class StreamService extends Service {
         startCommandServer();
         startAudioServer();
         startVideoServer();
-        return START_NOT_STICKY;
+        return START_STICKY;
     }
 
     @Override
