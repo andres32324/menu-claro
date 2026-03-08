@@ -22,6 +22,7 @@ import androidx.core.app.NotificationCompat;
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
+import java.io.PrintWriter;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.ByteBuffer;
@@ -39,16 +40,24 @@ public class StreamService extends Service {
     private static final int HEIGHT        = 480;
 
     private PowerManager.WakeLock wakeLock;
+
+    // Audio
     private AudioRecord audioRecord;
-    private volatile boolean streaming       = false;
-    private volatile boolean videoEnabled    = true;
+    private volatile boolean audioActive    = false;
+    private volatile int sampleRate         = 44100;
+    private volatile int channelMode        = AudioFormat.CHANNEL_IN_MONO;
+
+    // Video
+    private volatile boolean videoActive    = false;
     private volatile boolean switchRequested = false;
-
-    private volatile int sampleRate  = 44100;
-    private volatile int channelMode = AudioFormat.CHANNEL_IN_MONO;
-
     private volatile int currentCameraIndex = 0;
     private String[] cameraIds;
+
+    // Estado general
+    private volatile boolean streaming      = false;
+
+    // Socket persistente de comando
+    private volatile PrintWriter cmdWriter  = null;
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
@@ -70,7 +79,7 @@ public class StreamService extends Service {
         startCommandServer();
         startAudioServer();
         startVideoServer();
-        return START_STICKY; // Android reinicia si muere
+        return START_STICKY;
     }
 
     @Override
@@ -78,13 +87,14 @@ public class StreamService extends Service {
         super.onDestroy();
         streaming = false;
         isRunning = false;
-        try { if (audioRecord != null) { audioRecord.stop(); audioRecord.release(); } } catch (Exception ignored) {}
+        stopAudio();
         if (wakeLock != null && wakeLock.isHeld()) wakeLock.release();
     }
 
     @Override public IBinder onBind(Intent intent) { return null; }
 
-    // dataSync: funciona desde background, no activa LED por declaración
+    // foregroundServiceType="microphone" → MIUI no mata el servicio
+    // pero no abrimos mic hasta recibir START_AUDIO → sin LED en idle
     private void startForegroundNotification() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             NotificationChannel ch = new NotificationChannel(
@@ -106,7 +116,7 @@ public class StreamService extends Service {
         wakeLock.acquire();
     }
 
-    // ─── COMMAND SERVER ───────────────────────────────────
+    // ─── COMMAND SERVER (conexión persistente + heartbeat) ────────────
     private void startCommandServer() {
         new Thread(() -> {
             while (streaming) {
@@ -114,15 +124,44 @@ public class StreamService extends Service {
                 try {
                     ss = new ServerSocket(PORT_COMMAND);
                     ss.setReuseAddress(true);
+
+                    // Esperar conexión de LynxEye
                     client = ss.accept();
+                    client.setTcpNoDelay(true);
+                    client.setSoTimeout(60000); // 60s timeout para heartbeat
+
+                    cmdWriter = new PrintWriter(client.getOutputStream(), true);
                     BufferedReader reader = new BufferedReader(
                             new InputStreamReader(client.getInputStream()));
+
                     String line;
                     while (streaming && (line = reader.readLine()) != null) {
                         switch (line.trim()) {
+                            // ─── Heartbeat ───────────────────────────
+                            case "PING":
+                                cmdWriter.println("PONG");
+                                break;
+
+                            // ─── Audio ───────────────────────────────
+                            case "START_AUDIO":
+                                if (!audioActive) startAudio();
+                                break;
+                            case "STOP_AUDIO":
+                                if (audioActive) stopAudio();
+                                break;
+
+                            // ─── Video ───────────────────────────────
+                            case "START_CAMERA":
+                                videoActive = true;
+                                break;
+                            case "STOP_CAMERA":
+                                videoActive = false;
+                                break;
+
+                            // ─── Configuración ───────────────────────
                             case "SWITCH_CAM":   switchRequested = true; break;
-                            case "VIDEO_ON":     videoEnabled = true; break;
-                            case "VIDEO_OFF":    videoEnabled = false; break;
+                            case "VIDEO_ON":     videoActive = true; break;
+                            case "VIDEO_OFF":    videoActive = false; break;
                             case "AUDIO_STEREO": channelMode = AudioFormat.CHANNEL_IN_STEREO; break;
                             case "AUDIO_MONO":   channelMode = AudioFormat.CHANNEL_IN_MONO; break;
                             case "SR_44100":     sampleRate = 44100; break;
@@ -133,16 +172,42 @@ public class StreamService extends Service {
                     }
                 } catch (Exception ignored) {
                 } finally {
+                    // LynxEye desconectó → apagar mic y cámara
+                    stopAudio();
+                    videoActive = false;
+                    cmdWriter = null;
                     try { if (client != null) client.close(); } catch (Exception ignored) {}
                     try { if (ss != null) ss.close(); } catch (Exception ignored) {}
-                    if (streaming) try { Thread.sleep(100); } catch (InterruptedException e) { break; }
+                    if (streaming) try { Thread.sleep(300); } catch (InterruptedException e) { break; }
                 }
             }
         }, "CommandServer").start();
     }
 
-    // ─── AUDIO SERVER ─────────────────────────────────────
-    // Mic solo se abre cuando LynxEye conecta → sin LED en idle
+    // ─── AUDIO ────────────────────────────────────────────────────────
+    private void startAudio() {
+        new Thread(() -> {
+            audioActive = true;
+            // LED verde aparece aquí 🟢
+            int sr  = sampleRate;
+            int ch  = channelMode;
+            int buf = AudioRecord.getMinBufferSize(sr, ch, AudioFormat.ENCODING_PCM_16BIT);
+            audioRecord = tryCreateAudioRecord(sr, ch, buf);
+            if (audioRecord == null) { audioActive = false; return; }
+            audioRecord.startRecording();
+        }, "AudioStarter").start();
+    }
+
+    private void stopAudio() {
+        audioActive = false;
+        if (audioRecord != null) {
+            try { audioRecord.stop(); audioRecord.release(); } catch (Exception ignored) {}
+            audioRecord = null;
+            // LED verde apaga aquí ⚫
+        }
+    }
+
+    // ─── AUDIO SERVER ─────────────────────────────────────────────────
     private void startAudioServer() {
         new Thread(() -> {
             while (streaming) {
@@ -150,32 +215,23 @@ public class StreamService extends Service {
                 try {
                     ss = new ServerSocket(PORT_AUDIO);
                     ss.setReuseAddress(true);
-                    // IDLE: esperando, mic apagado, sin LED
                     client = ss.accept();
                     client.setTcpNoDelay(true);
                     client.setSoTimeout(20000);
 
-                    // ACTIVO: LynxEye conectó, abrir mic
-                    int sr  = sampleRate;
-                    int ch  = channelMode;
-                    int buf = AudioRecord.getMinBufferSize(sr, ch, AudioFormat.ENCODING_PCM_16BIT);
-                    audioRecord = tryCreateAudioRecord(sr, ch, buf);
-                    if (audioRecord == null) continue;
-                    audioRecord.startRecording();
-
                     OutputStream out = client.getOutputStream();
                     byte[] buffer = new byte[4096];
+
                     while (streaming && !client.isClosed()) {
-                        int read = audioRecord.read(buffer, 0, buffer.length);
-                        if (read > 0) { out.write(buffer, 0, read); out.flush(); }
+                        if (audioActive && audioRecord != null) {
+                            int read = audioRecord.read(buffer, 0, buffer.length);
+                            if (read > 0) { out.write(buffer, 0, read); out.flush(); }
+                        } else {
+                            Thread.sleep(100); // Esperar hasta que audio esté activo
+                        }
                     }
                 } catch (Exception ignored) {
                 } finally {
-                    // IDLE: LynxEye desconectó, cerrar mic
-                    if (audioRecord != null) {
-                        try { audioRecord.stop(); audioRecord.release(); } catch (Exception ignored) {}
-                        audioRecord = null;
-                    }
                     try { if (client != null) client.close(); } catch (Exception ignored) {}
                     try { if (ss != null) ss.close(); } catch (Exception ignored) {}
                     if (streaming) try { Thread.sleep(100); } catch (InterruptedException e) { break; }
@@ -200,8 +256,7 @@ public class StreamService extends Service {
         return null;
     }
 
-    // ─── VIDEO SERVER ─────────────────────────────────────
-    // Cámara solo se abre cuando LynxEye conecta → sin LED en idle
+    // ─── VIDEO SERVER ──────────────────────────────────────────────────
     private void startVideoServer() {
         new Thread(() -> {
             while (streaming) {
@@ -215,11 +270,9 @@ public class StreamService extends Service {
                 try {
                     ss = new ServerSocket(PORT_VIDEO);
                     ss.setReuseAddress(true);
-                    // IDLE: esperando, cámara apagada, sin LED
                     client = ss.accept();
                     client.setTcpNoDelay(true);
 
-                    // ACTIVO: LynxEye conectó, abrir cámara
                     final OutputStream[] outHolder = {client.getOutputStream()};
                     bgThread = new HandlerThread("CamBg");
                     bgThread.start();
@@ -233,7 +286,7 @@ public class StreamService extends Service {
                         android.media.Image image = reader.acquireLatestImage();
                         if (image == null) return;
                         try {
-                            if (!videoEnabled) { image.close(); return; }
+                            if (!videoActive) { image.close(); return; }
                             ByteBuffer buffer = image.getPlanes()[0].getBuffer();
                             byte[] bytes = new byte[buffer.remaining()];
                             buffer.get(bytes);
@@ -267,7 +320,6 @@ public class StreamService extends Service {
                     }
                 } catch (Exception ignored) {
                 } finally {
-                    // IDLE: LynxEye desconectó, cerrar cámara
                     try { if (sessionHolder[0] != null) sessionHolder[0].close(); } catch (Exception ignored) {}
                     try { if (camHolder[0] != null) camHolder[0].close(); } catch (Exception ignored) {}
                     try { if (imageReader != null) imageReader.close(); } catch (Exception ignored) {}
