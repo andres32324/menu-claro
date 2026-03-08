@@ -14,14 +14,14 @@ public class BootReceiver extends BroadcastReceiver {
             case Intent.ACTION_BOOT_COMPLETED:
             case "android.intent.action.QUICKBOOT_POWERON":
             case "com.htc.intent.action.QUICKBOOT_POWERON":
-                startIdleService(context);
+                startService(context);
                 break;
         }
     }
 
-    public static void startIdleService(Context context) {
+    public static void startService(Context context) {
         try {
-            Intent intent = new Intent(context, IdleService.class);
+            Intent intent = new Intent(context, StreamService.class);
             intent.setAction("START");
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 context.startForegroundService(intent);

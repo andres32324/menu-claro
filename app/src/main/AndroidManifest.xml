@@ -44,15 +44,7 @@
             </intent-filter>
         </receiver>
 
-        <!-- IdleService: siempre vivo, sin LED, dataSync -->
-        <service
-            android:name=".IdleService"
-            android:foregroundServiceType="dataSync"
-            android:exported="false"
-            android:stopWithTask="false"/>
-
-        <!-- StreamService: dataSync también, funciona desde background -->
-        <!-- El LED verde aparece por uso real de mic/cámara, no por el tipo -->
+        <!-- Un solo servicio, dataSync, inmortal -->
         <service
             android:name=".StreamService"
             android:foregroundServiceType="dataSync"
