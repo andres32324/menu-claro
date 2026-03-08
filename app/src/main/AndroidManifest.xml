@@ -9,6 +9,7 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
@@ -33,7 +34,6 @@
             </intent-filter>
         </activity>
 
-        <!-- Arrancar automáticamente al encender el teléfono -->
         <receiver
             android:name=".BootReceiver"
             android:exported="true"
@@ -46,10 +46,10 @@
             </intent-filter>
         </receiver>
 
-        <!-- Servicio principal de transmisión -->
+        <!-- connectedDevice = sin LED verde cuando no usa camara/mic -->
         <service
             android:name=".StreamService"
-            android:foregroundServiceType="microphone|camera"
+            android:foregroundServiceType="connectedDevice"
             android:exported="false"
             android:stopWithTask="false"/>
 
