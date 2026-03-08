@@ -84,8 +84,7 @@ public class MainActivity extends AppCompatActivity {
         isStreaming = true;
         btnToggle.setBackgroundResource(R.drawable.btn_on);
         tvBtnStatus.setTextColor(0xFF4CAF50);
-        // Arrancar IdleService - él maneja todo lo demás
-        BootReceiver.startIdleService(this);
+        BootReceiver.startService(this);
         Toast.makeText(this, "Transmitiendo...", Toast.LENGTH_SHORT).show();
     }
 
@@ -93,11 +92,9 @@ public class MainActivity extends AppCompatActivity {
         isStreaming = false;
         btnToggle.setBackgroundResource(R.drawable.btn_off);
         tvBtnStatus.setTextColor(0xFFE53935);
-        // Detener ambos servicios
-        Intent i1 = new Intent(this, IdleService.class);
-        i1.setAction("STOP"); startService(i1);
-        Intent i2 = new Intent(this, StreamService.class);
-        i2.setAction("STOP"); startService(i2);
+        Intent intent = new Intent(this, StreamService.class);
+        intent.setAction("STOP");
+        startService(intent);
         Toast.makeText(this, "Detenido", Toast.LENGTH_SHORT).show();
     }
 
@@ -115,15 +112,16 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onStop() {
         super.onStop();
-        if (isStreaming && !IdleService.isRunning) {
-            BootReceiver.startIdleService(this);
+        // Si estaba transmitiendo y el servicio murió, reiniciarlo
+        if (isStreaming && !StreamService.isRunning) {
+            BootReceiver.startService(this);
         }
     }
 
     @Override
     protected void onResume() {
         super.onResume();
-        isStreaming = IdleService.isRunning || StreamService.isRunning;
+        isStreaming = StreamService.isRunning;
         if (isStreaming) {
             btnToggle.setBackgroundResource(R.drawable.btn_on);
             tvBtnStatus.setTextColor(0xFF4CAF50);
