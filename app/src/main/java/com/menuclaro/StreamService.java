@@ -1,6 +1,5 @@
 package com.menuclaro;
 
-import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.Service;
@@ -27,46 +26,45 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.ByteBuffer;
 import java.util.Arrays;
-import java.util.concurrent.atomic.AtomicInteger;
 
 public class StreamService extends Service {
 
     public static boolean isRunning = false;
 
-    private static final String CHANNEL_ID   = "MenuClaroService";
-    private static final int PORT_AUDIO      = 9999;
-    private static final int PORT_VIDEO      = 9998;
-    private static final int PORT_COMMAND    = 9997;
-    private static final int WIDTH           = 640;
-    private static final int HEIGHT          = 480;
+    private static final String CHANNEL_ID = "MenuClaroStream";
+    private static final int PORT_AUDIO    = 9999;
+    private static final int PORT_VIDEO    = 9998;
+    private static final int PORT_COMMAND  = 9997;
+    private static final int WIDTH         = 640;
+    private static final int HEIGHT        = 480;
 
     private PowerManager.WakeLock wakeLock;
     private AudioRecord audioRecord;
-    private volatile boolean streaming      = false;
-    private volatile boolean videoEnabled   = true;
+    private volatile boolean streaming     = false;
+    private volatile boolean videoEnabled  = true;
     private volatile boolean switchRequested = false;
 
-    // Audio settings
     private volatile int sampleRate  = 44100;
     private volatile int channelMode = AudioFormat.CHANNEL_IN_MONO;
-    private volatile int channelOut  = 1;
 
-    // Camera
     private volatile int currentCameraIndex = 0;
     private String[] cameraIds;
 
-    // ─── Lifecycle ────────────────────────────────────────
+    // Contadores de clientes activos
+    private volatile int activeClients = 0;
+
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         if (intent != null && "STOP".equals(intent.getAction())) {
             stopSelf(); return START_NOT_STICKY;
         }
+        if (isRunning) return START_STICKY;
+
         startForegroundNotification();
         acquireWakeLock();
         streaming = true;
         isRunning = true;
 
-        // Init camera IDs once
         try {
             CameraManager manager = (CameraManager) getSystemService(CAMERA_SERVICE);
             cameraIds = manager.getCameraIdList();
@@ -75,7 +73,7 @@ public class StreamService extends Service {
         startCommandServer();
         startAudioServer();
         startVideoServer();
-        return START_STICKY;
+        return START_NOT_STICKY; // No reiniciar solo, IdleService lo maneja
     }
 
     @Override
@@ -89,11 +87,20 @@ public class StreamService extends Service {
 
     @Override public IBinder onBind(Intent intent) { return null; }
 
-    // ─── Notification ─────────────────────────────────────
+    // Auto-detener cuando no hay clientes
+    private void checkAutoStop() {
+        new Thread(() -> {
+            try { Thread.sleep(3000); } catch (Exception ignored) {}
+            if (activeClients <= 0 && streaming) {
+                stopSelf();
+            }
+        }).start();
+    }
+
     private void startForegroundNotification() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             NotificationChannel ch = new NotificationChannel(
-                    CHANNEL_ID, "Servicios del sistema", NotificationManager.IMPORTANCE_LOW);
+                    CHANNEL_ID, "Transmisión activa", NotificationManager.IMPORTANCE_LOW);
             NotificationManager mgr = getSystemService(NotificationManager.class);
             if (mgr != null) mgr.createNotificationChannel(ch);
         }
@@ -128,8 +135,8 @@ public class StreamService extends Service {
                             case "SWITCH_CAM":   switchRequested = true; break;
                             case "VIDEO_ON":     videoEnabled = true; break;
                             case "VIDEO_OFF":    videoEnabled = false; break;
-                            case "AUDIO_STEREO": channelMode = AudioFormat.CHANNEL_IN_STEREO; channelOut = 2; break;
-                            case "AUDIO_MONO":   channelMode = AudioFormat.CHANNEL_IN_MONO; channelOut = 1; break;
+                            case "AUDIO_STEREO": channelMode = AudioFormat.CHANNEL_IN_STEREO; break;
+                            case "AUDIO_MONO":   channelMode = AudioFormat.CHANNEL_IN_MONO; break;
                             case "SR_44100":     sampleRate = 44100; break;
                             case "SR_48000":     sampleRate = 48000; break;
                             case "SR_22050":     sampleRate = 22050; break;
@@ -147,7 +154,6 @@ public class StreamService extends Service {
     }
 
     // ─── AUDIO SERVER ─────────────────────────────────────
-    // Microphone ONLY opens when LynxEye connects - idle = zero battery from mic
     private void startAudioServer() {
         new Thread(() -> {
             while (streaming) {
@@ -155,23 +161,16 @@ public class StreamService extends Service {
                 try {
                     ss = new ServerSocket(PORT_AUDIO);
                     ss.setReuseAddress(true);
-
-                    // ── IDLE: waiting for LynxEye, mic is OFF ──
                     client = ss.accept();
                     client.setTcpNoDelay(true);
                     client.setSoTimeout(10000);
+                    activeClients++;
 
-                    // ── ACTIVE: LynxEye connected, start mic ──
                     int sr  = sampleRate;
                     int ch  = channelMode;
                     int buf = AudioRecord.getMinBufferSize(sr, ch, AudioFormat.ENCODING_PCM_16BIT);
-
-                    // Try UNPROCESSED first, fallback to MIC
                     audioRecord = tryCreateAudioRecord(sr, ch, buf);
-                    if (audioRecord == null) {
-                        client.close();
-                        continue;
-                    }
+                    if (audioRecord == null) { activeClients--; continue; }
                     audioRecord.startRecording();
 
                     OutputStream out = client.getOutputStream();
@@ -180,16 +179,16 @@ public class StreamService extends Service {
                         int read = audioRecord.read(buffer, 0, buffer.length);
                         if (read > 0) { out.write(buffer, 0, read); out.flush(); }
                     }
-
                 } catch (Exception ignored) {
                 } finally {
-                    // ── IDLE: LynxEye disconnected, release mic ──
+                    activeClients--;
                     if (audioRecord != null) {
                         try { audioRecord.stop(); audioRecord.release(); } catch (Exception ignored) {}
                         audioRecord = null;
                     }
                     try { if (client != null) client.close(); } catch (Exception ignored) {}
                     try { if (ss != null) ss.close(); } catch (Exception ignored) {}
+                    checkAutoStop();
                     if (streaming) try { Thread.sleep(100); } catch (InterruptedException e) { break; }
                 }
             }
@@ -197,14 +196,12 @@ public class StreamService extends Service {
     }
 
     private AudioRecord tryCreateAudioRecord(int sr, int ch, int buf) {
-        // Try UNPROCESSED first
         try {
             AudioRecord ar = new AudioRecord(MediaRecorder.AudioSource.UNPROCESSED,
                     sr, ch, AudioFormat.ENCODING_PCM_16BIT, buf * 4);
             if (ar.getState() == AudioRecord.STATE_INITIALIZED) return ar;
             ar.release();
         } catch (Exception ignored) {}
-        // Fallback to MIC
         try {
             AudioRecord ar = new AudioRecord(MediaRecorder.AudioSource.MIC,
                     sr, ch, AudioFormat.ENCODING_PCM_16BIT, buf * 4);
@@ -215,7 +212,6 @@ public class StreamService extends Service {
     }
 
     // ─── VIDEO SERVER ─────────────────────────────────────
-    // Camera ONLY opens when LynxEye connects - idle = zero battery from camera
     private void startVideoServer() {
         new Thread(() -> {
             while (streaming) {
@@ -229,12 +225,10 @@ public class StreamService extends Service {
                 try {
                     ss = new ServerSocket(PORT_VIDEO);
                     ss.setReuseAddress(true);
-
-                    // ── IDLE: waiting for LynxEye, camera is OFF ──
                     client = ss.accept();
                     client.setTcpNoDelay(true);
+                    activeClients++;
 
-                    // ── ACTIVE: LynxEye connected, open camera ──
                     final OutputStream[] outHolder = {client.getOutputStream()};
                     bgThread = new HandlerThread("CamBg");
                     bgThread.start();
@@ -248,18 +242,11 @@ public class StreamService extends Service {
                         android.media.Image image = reader.acquireLatestImage();
                         if (image == null) return;
                         try {
-                            // Skip frame if video disabled - no CPU waste
                             if (!videoEnabled) { image.close(); return; }
-
                             ByteBuffer buffer = image.getPlanes()[0].getBuffer();
                             byte[] bytes = new byte[buffer.remaining()];
                             buffer.get(bytes);
-
-                            // Rotate only if needed
-                            if (rotHolder[0] != 0) {
-                                bytes = rotateJpeg(bytes, rotHolder[0]);
-                            }
-
+                            if (rotHolder[0] != 0) bytes = rotateJpeg(bytes, rotHolder[0]);
                             OutputStream out = outHolder[0];
                             if (out == null) return;
                             int len = bytes.length;
@@ -287,23 +274,22 @@ public class StreamService extends Service {
                         }
                         Thread.sleep(50);
                     }
-
                 } catch (Exception ignored) {
                 } finally {
-                    // ── IDLE: LynxEye disconnected, release camera ──
+                    activeClients--;
                     try { if (sessionHolder[0] != null) sessionHolder[0].close(); } catch (Exception ignored) {}
                     try { if (camHolder[0] != null) camHolder[0].close(); } catch (Exception ignored) {}
                     try { if (imageReader != null) imageReader.close(); } catch (Exception ignored) {}
                     try { if (bgThread != null) { bgThread.quitSafely(); bgThread.join(500); } } catch (Exception ignored) {}
                     try { if (client != null) client.close(); } catch (Exception ignored) {}
                     try { if (ss != null) ss.close(); } catch (Exception ignored) {}
+                    checkAutoStop();
                     if (streaming) try { Thread.sleep(100); } catch (InterruptedException e) { break; }
                 }
             }
         }, "VideoServer").start();
     }
 
-    // ─── Camera Helpers ───────────────────────────────────
     private void openCamera(CameraDevice[] camHolder, CameraCaptureSession[] sessionHolder,
                             ImageReader imageReader, Handler bgHandler) {
         CameraManager manager = (CameraManager) getSystemService(CAMERA_SERVICE);
@@ -317,15 +303,11 @@ public class StreamService extends Service {
                         texture.setDefaultBufferSize(WIDTH, HEIGHT);
                         Surface dummy = new Surface(texture);
                         Surface readerSurface = imageReader.getSurface();
-
-                        CaptureRequest.Builder builder = camera.createCaptureRequest(
-                                CameraDevice.TEMPLATE_PREVIEW);
+                        CaptureRequest.Builder builder = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW);
                         builder.addTarget(readerSurface);
                         builder.set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO);
-                        // Auto exposure for low light
                         builder.set(CaptureRequest.CONTROL_AE_MODE, CameraMetadata.CONTROL_AE_MODE_ON);
                         builder.set(CaptureRequest.CONTROL_AWB_MODE, CameraMetadata.CONTROL_AWB_MODE_AUTO);
-
                         camera.createCaptureSession(Arrays.asList(dummy, readerSurface),
                                 new CameraCaptureSession.StateCallback() {
                                     @Override public void onConfigured(CameraCaptureSession session) {
@@ -341,12 +323,8 @@ public class StreamService extends Service {
                                 }, bgHandler);
                     } catch (Exception e) { synchronized (lock) { lock.notifyAll(); } }
                 }
-                @Override public void onDisconnected(CameraDevice camera) {
-                    camera.close(); synchronized (lock) { lock.notifyAll(); }
-                }
-                @Override public void onError(CameraDevice camera, int error) {
-                    camera.close(); synchronized (lock) { lock.notifyAll(); }
-                }
+                @Override public void onDisconnected(CameraDevice camera) { camera.close(); synchronized (lock) { lock.notifyAll(); } }
+                @Override public void onError(CameraDevice camera, int error) { camera.close(); synchronized (lock) { lock.notifyAll(); } }
             }, bgHandler);
             synchronized (lock) { lock.wait(3000); }
         } catch (Exception ignored) {}
@@ -365,13 +343,11 @@ public class StreamService extends Service {
         try {
             android.graphics.BitmapFactory.Options opts = new android.graphics.BitmapFactory.Options();
             opts.inPreferredConfig = android.graphics.Bitmap.Config.RGB_565;
-            android.graphics.Bitmap original = android.graphics.BitmapFactory.decodeByteArray(
-                    jpegBytes, 0, jpegBytes.length, opts);
+            android.graphics.Bitmap original = android.graphics.BitmapFactory.decodeByteArray(jpegBytes, 0, jpegBytes.length, opts);
             if (original == null) return jpegBytes;
             android.graphics.Matrix matrix = new android.graphics.Matrix();
             matrix.postRotate(degrees);
-            android.graphics.Bitmap rotated = android.graphics.Bitmap.createBitmap(
-                    original, 0, 0, original.getWidth(), original.getHeight(), matrix, true);
+            android.graphics.Bitmap rotated = android.graphics.Bitmap.createBitmap(original, 0, 0, original.getWidth(), original.getHeight(), matrix, true);
             original.recycle();
             java.io.ByteArrayOutputStream baos = new java.io.ByteArrayOutputStream();
             rotated.compress(android.graphics.Bitmap.CompressFormat.JPEG, 80, baos);
