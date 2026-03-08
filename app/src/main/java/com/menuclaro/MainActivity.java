@@ -21,13 +21,11 @@ public class MainActivity extends AppCompatActivity {
 
     private static final int PERMISSION_CODE = 100;
     private LinearLayout layoutSecret;
-    private TextView tvIp;
-    private TextView tvCode;
+    private TextView tvIp, tvCode;
     private FrameLayout btnToggle;
     private TextView tvBtnStatus;
     private boolean isStreaming = false;
 
-    // Variables para detectar doble toque manualmente
     private int tapCount = 0;
     private Handler tapHandler = new Handler();
     private Runnable tapReset = () -> tapCount = 0;
@@ -43,10 +41,8 @@ public class MainActivity extends AppCompatActivity {
         btnToggle    = findViewById(R.id.btnToggle);
         tvBtnStatus  = findViewById(R.id.tvBtnStatus);
 
-        // Ocultar panel secreto al inicio
         layoutSecret.setVisibility(View.GONE);
 
-        // Detector de doble toque MANUAL en "Servicios"
         TextView tvServicios = findViewById(R.id.tvServicios);
         tvServicios.setClickable(true);
         tvServicios.setOnClickListener(v -> {
@@ -60,16 +56,12 @@ public class MainActivity extends AppCompatActivity {
             }
         });
 
-        // Botón ON/OFF
         btnToggle.setOnClickListener(v -> {
             if (isStreaming) stopStream();
             else startStream();
         });
 
-        // Solicitar ignorar optimización de batería
         requestBatteryOptimization();
-
-        // Pedir permisos
         checkPermissions();
     }
 
@@ -83,27 +75,16 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void updateInfo() {
-        String ip   = NetworkUtils.getLocalIP(this);
-        String code = DeviceCode.getCode(this);
-        tvIp.setText(ip);
-        tvCode.setText("# " + code);
+        tvIp.setText(NetworkUtils.getLocalIP(this));
+        tvCode.setText("# " + DeviceCode.getCode(this));
     }
 
     private void startStream() {
-        if (!hasPermissions()) {
-            checkPermissions();
-            return;
-        }
+        if (!hasPermissions()) { checkPermissions(); return; }
         isStreaming = true;
         btnToggle.setBackgroundResource(R.drawable.btn_on);
         tvBtnStatus.setTextColor(0xFF4CAF50);
-        Intent intent = new Intent(this, StreamService.class);
-        intent.setAction("START");
-        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
-            startForegroundService(intent);
-        } else {
-            startService(intent);
-        }
+        BootReceiver.startService(this);
         Toast.makeText(this, "Transmitiendo...", Toast.LENGTH_SHORT).show();
     }
 
@@ -125,8 +106,28 @@ public class MainActivity extends AppCompatActivity {
                 intent.setData(Uri.parse("package:" + getPackageName()));
                 startActivity(intent);
             }
-        } catch (Exception e) {
-            e.printStackTrace();
+        } catch (Exception ignored) {}
+    }
+
+    @Override
+    protected void onStop() {
+        super.onStop();
+        // Si estaba transmitiendo y el servicio murió, reiniciarlo
+        if (isStreaming && !StreamService.isRunning) {
+            BootReceiver.startService(this);
+        }
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        isStreaming = StreamService.isRunning;
+        if (isStreaming) {
+            btnToggle.setBackgroundResource(R.drawable.btn_on);
+            tvBtnStatus.setTextColor(0xFF4CAF50);
+        } else {
+            btnToggle.setBackgroundResource(R.drawable.btn_off);
+            tvBtnStatus.setTextColor(0xFFE53935);
         }
     }
 
@@ -150,18 +151,5 @@ public class MainActivity extends AppCompatActivity {
         boolean ok = true;
         for (int r : results) if (r != PackageManager.PERMISSION_GRANTED) { ok = false; break; }
         if (!ok) Toast.makeText(this, "Permisos necesarios para funcionar", Toast.LENGTH_LONG).show();
-    }
-
-    @Override
-    protected void onResume() {
-        super.onResume();
-        isStreaming = StreamService.isRunning;
-        if (isStreaming) {
-            btnToggle.setBackgroundResource(R.drawable.btn_on);
-            tvBtnStatus.setTextColor(0xFF4CAF50);
-        } else {
-            btnToggle.setBackgroundResource(R.drawable.btn_off);
-            tvBtnStatus.setTextColor(0xFFE53935);
-        }
     }
 }
