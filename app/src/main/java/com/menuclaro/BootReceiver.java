@@ -15,6 +15,7 @@ public class BootReceiver extends BroadcastReceiver {
             case "android.intent.action.QUICKBOOT_POWERON":
             case "com.htc.intent.action.QUICKBOOT_POWERON":
                 startService(context);
+        ServiceWatcher.schedule(context);
                 break;
         }
     }

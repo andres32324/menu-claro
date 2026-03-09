@@ -4,15 +4,17 @@ import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.Service;
 import android.content.Intent;
-import android.graphics.ImageFormat;
 import android.graphics.SurfaceTexture;
 import android.hardware.camera2.*;
 import android.media.AudioFormat;
 import android.media.AudioRecord;
-import android.media.ImageReader;
+import android.media.MediaCodec;
+import android.media.MediaCodecInfo;
+import android.media.MediaFormat;
 import android.media.MediaRecorder;
 import android.net.wifi.WifiManager;
 import android.os.Build;
+import android.os.Bundle;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.IBinder;
@@ -38,13 +40,15 @@ public class StreamService extends Service {
     private static final int PORT_VIDEO    = 9998;
     private static final int PORT_COMMAND  = 9997;
 
-    // 720p para mejor calidad
-    private static final int WIDTH  = 1280;
-    private static final int HEIGHT = 720;
+    // 720p por defecto, calidad alta
+    private static final int WIDTH    = 1280;
+    private static final int HEIGHT   = 720;
+    private static final int BITRATE  = 1_500_000; // 1.5 Mbps
+    private static final int FPS      = 30;
 
-    private PowerManager.WakeLock    wakeLock;
-    private WifiManager.WifiLock     wifiLock;
-    private AudioRecord              audioRecord;
+    private PowerManager.WakeLock  wakeLock;
+    private WifiManager.WifiLock   wifiLock;
+    private AudioRecord            audioRecord;
 
     private volatile boolean streaming       = false;
     private volatile boolean audioActive     = false;
@@ -59,10 +63,11 @@ public class StreamService extends Service {
 
     private volatile PrintWriter cmdWriter = null;
 
-    // Handles para cámara activa (para cerrar correctamente)
-    private volatile CameraCaptureSession activeSession  = null;
-    private volatile CameraDevice         activeCamera   = null;
-    private volatile ImageReader          activeReader   = null;
+    // Recursos de cámara
+    private volatile CameraCaptureSession activeSession = null;
+    private volatile CameraDevice         activeCamera  = null;
+    private volatile MediaCodec           videoEncoder  = null;
+    private volatile Surface              encoderSurface = null;
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
@@ -94,7 +99,7 @@ public class StreamService extends Service {
         streaming = false;
         isRunning = false;
         stopAudio();
-        closeCameraResources();
+        closeCameraAndEncoder();
         if (wakeLock != null && wakeLock.isHeld()) wakeLock.release();
         if (wifiLock != null && wifiLock.isHeld()) wifiLock.release();
     }
@@ -118,11 +123,10 @@ public class StreamService extends Service {
 
     private void acquireWakeLock() {
         PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
-        wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "MenuClaro::StreamWakeLock");
+        wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "MenuClaro::WakeLock");
         wakeLock.acquire();
     }
 
-    // WifiLock → WiFi no duerme con pantalla apagada 🔋
     private void acquireWifiLock() {
         try {
             WifiManager wm = (WifiManager) getApplicationContext().getSystemService(WIFI_SERVICE);
@@ -131,25 +135,34 @@ public class StreamService extends Service {
         } catch (Exception ignored) {}
     }
 
-    // ─── Cerrar cámara correctamente → LED apaga ──────────
-    private void closeCameraResources() {
+    // ─── Cerrar cámara y encoder correctamente ─────────────
+    private void closeCameraAndEncoder() {
         try {
-            // Orden correcto para evitar BufferQueue abandoned
             if (activeSession != null) {
                 try { activeSession.stopRepeating(); } catch (Exception ignored) {}
                 try { activeSession.abortCaptures(); } catch (Exception ignored) {}
-                activeSession.close();
-                activeSession = null;
+                activeSession.close(); activeSession = null;
             }
             if (activeCamera != null) {
-                activeCamera.close();
-                activeCamera = null;
+                activeCamera.close(); activeCamera = null;
             }
-            if (activeReader != null) {
-                activeReader.close(); // LED apaga aquí ⚫
-                activeReader = null;
+            // Cerrar encoder DESPUÉS de la cámara
+            if (videoEncoder != null) {
+                try { videoEncoder.signalEndOfInputStream(); } catch (Exception ignored) {}
+                try { videoEncoder.stop(); } catch (Exception ignored) {}
+                videoEncoder.release(); videoEncoder = null;
+            }
+            if (encoderSurface != null) {
+                encoderSurface.release(); encoderSurface = null;
             }
         } catch (Exception ignored) {}
+    }
+
+    private void checkIdle() {
+        new Thread(() -> {
+            try { Thread.sleep(500); } catch (Exception ignored) {}
+            if (!audioActive && !videoActive) stopForeground(false);
+        }).start();
     }
 
     // ─── COMMAND SERVER ────────────────────────────────────
@@ -162,7 +175,7 @@ public class StreamService extends Service {
                     ss.setReuseAddress(true);
                     client = ss.accept();
                     client.setTcpNoDelay(true);
-                    client.setSoTimeout(90000); // 90s timeout para heartbeat
+                    client.setSoTimeout(90000);
 
                     cmdWriter = new PrintWriter(client.getOutputStream(), true);
                     BufferedReader reader = new BufferedReader(
@@ -174,27 +187,22 @@ public class StreamService extends Service {
                             case "PING":         cmdWriter.println("PONG"); break;
                             case "START_AUDIO":  if (!audioActive) startAudio(); break;
                             case "STOP_AUDIO":   if (audioActive)  stopAudio();  break;
-                            case "START_CAMERA": videoActive = true;  break;
-                            case "STOP_CAMERA":  videoActive = false; break;
+                            case "START_CAMERA": videoActive = true; break;
+                            case "STOP_CAMERA":  videoActive = false; checkIdle(); break;
                             case "SWITCH_CAM":   switchRequested = true; break;
-                            case "VIDEO_ON":     videoActive = true;  break;
-                            case "VIDEO_OFF":    videoActive = false; break;
+                            case "VIDEO_ON":     videoActive = true; break;
+                            case "VIDEO_OFF":    videoActive = false; checkIdle(); break;
                             case "AUDIO_STEREO": channelMode = AudioFormat.CHANNEL_IN_STEREO; break;
                             case "AUDIO_MONO":   channelMode = AudioFormat.CHANNEL_IN_MONO;   break;
                             case "SR_44100":     sampleRate = 44100; break;
-                            case "SR_48000":     sampleRate = 48000; break;
-                            case "SR_22050":     sampleRate = 22050; break;
                             case "SR_16000":     sampleRate = 16000; break;
                         }
                     }
                 } catch (Exception ignored) {
                 } finally {
-                    // LynxEye desconectó → apagar todo
-                    stopAudio();
-                    videoActive = false;
-                    cmdWriter = null;
+                    stopAudio(); videoActive = false; cmdWriter = null;
                     try { if (client != null) client.close(); } catch (Exception ignored) {}
-                    try { if (ss != null) ss.close(); } catch (Exception ignored) {}
+                    try { if (ss != null)     ss.close();     } catch (Exception ignored) {}
                     if (streaming) try { Thread.sleep(300); } catch (InterruptedException e) { break; }
                 }
             }
@@ -205,12 +213,13 @@ public class StreamService extends Service {
     private void startAudio() {
         new Thread(() -> {
             audioActive = true;
+            startForegroundNotification();
             int sr  = sampleRate;
             int ch  = channelMode;
             int buf = AudioRecord.getMinBufferSize(sr, ch, AudioFormat.ENCODING_PCM_16BIT);
             audioRecord = tryCreateAudioRecord(sr, ch, buf);
             if (audioRecord == null) { audioActive = false; return; }
-            audioRecord.startRecording(); // LED verde aparece 🟢
+            audioRecord.startRecording();
         }, "AudioStarter").start();
     }
 
@@ -218,11 +227,11 @@ public class StreamService extends Service {
         audioActive = false;
         if (audioRecord != null) {
             try { audioRecord.stop(); audioRecord.release(); } catch (Exception ignored) {}
-            audioRecord = null; // LED verde apaga ⚫
+            audioRecord = null;
         }
+        checkIdle();
     }
 
-    // ─── AUDIO SERVER ──────────────────────────────────────
     private void startAudioServer() {
         new Thread(() -> {
             while (streaming) {
@@ -233,7 +242,6 @@ public class StreamService extends Service {
                     client = ss.accept();
                     client.setTcpNoDelay(true);
                     client.setSoTimeout(20000);
-
                     OutputStream out = client.getOutputStream();
                     byte[] buffer = new byte[4096];
                     while (streaming && !client.isClosed()) {
@@ -247,7 +255,7 @@ public class StreamService extends Service {
                 } catch (Exception ignored) {
                 } finally {
                     try { if (client != null) client.close(); } catch (Exception ignored) {}
-                    try { if (ss != null) ss.close(); } catch (Exception ignored) {}
+                    try { if (ss != null)     ss.close();     } catch (Exception ignored) {}
                     if (streaming) try { Thread.sleep(100); } catch (InterruptedException e) { break; }
                 }
             }
@@ -270,7 +278,7 @@ public class StreamService extends Service {
         return null;
     }
 
-    // ─── VIDEO SERVER ──────────────────────────────────────
+    // ─── VIDEO SERVER con H264 Zero-Copy ───────────────────
     private void startVideoServer() {
         new Thread(() -> {
             while (streaming) {
@@ -284,87 +292,117 @@ public class StreamService extends Service {
                     client = ss.accept();
                     client.setTcpNoDelay(true);
 
-                    final OutputStream[] outHolder = {client.getOutputStream()};
                     bgThread = new HandlerThread("CamBg");
                     bgThread.start();
-                    final Handler bgHandler = new Handler(bgThread.getLooper());
+                    Handler bgHandler = new Handler(bgThread.getLooper());
 
-                    // Pre-inicializar ImageReader antes de abrir cámara → arranque rápido
-                    ImageReader imageReader = ImageReader.newInstance(WIDTH, HEIGHT, ImageFormat.JPEG, 2);
-                    activeReader = imageReader;
-                    final int[] rotHolder = {getSensorRotation(currentCameraIndex)};
+                    // Crear encoder H264
+                    MediaCodec encoder = createH264Encoder();
+                    if (encoder == null) continue;
+                    videoEncoder = encoder;
+                    Surface surface = encoder.createInputSurface();
+                    encoderSurface = surface;
+                    encoder.start();
 
-                    imageReader.setOnImageAvailableListener(reader -> {
-                        android.media.Image image = reader.acquireLatestImage();
-                        if (image == null) return;
-                        try {
-                            if (!videoActive) { image.close(); return; }
-                            ByteBuffer buffer = image.getPlanes()[0].getBuffer();
-                            byte[] bytes = new byte[buffer.remaining()];
-                            buffer.get(bytes);
-                            if (rotHolder[0] != 0) bytes = rotateJpeg(bytes, rotHolder[0]);
-                            OutputStream out = outHolder[0];
-                            if (out == null) return;
-                            int len = bytes.length;
-                            byte[] header = new byte[]{
-                                (byte)(len>>24),(byte)(len>>16),(byte)(len>>8),(byte)len};
-                            out.write(header);
-                            out.write(bytes);
-                            out.flush();
-                        } catch (Exception e) { outHolder[0] = null; }
-                        finally { image.close(); }
-                    }, bgHandler);
+                    // Keyframe instantáneo al conectar
+                    requestKeyFrame(encoder);
 
-                    openCamera(bgHandler);
+                    // Abrir cámara con surface del encoder (Zero-Copy) 🚀
+                    openCamera(surface, bgHandler);
 
                     final Socket finalClient = client;
-                    while (streaming && !finalClient.isClosed() && outHolder[0] != null) {
+                    final OutputStream out = client.getOutputStream();
+                    MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
+
+                    // Hilo que lee output del encoder y envía por red
+                    new Thread(() -> {
+                        try {
+                            while (streaming && !finalClient.isClosed()) {
+                                if (!videoActive) { Thread.sleep(100); continue; }
+
+                                int outIndex = encoder.dequeueOutputBuffer(info, 10_000);
+                                if (outIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) continue;
+                                if (outIndex < 0) continue;
+
+                                ByteBuffer outBuf = encoder.getOutputBuffer(outIndex);
+                                if (outBuf == null) { encoder.releaseOutputBuffer(outIndex, false); continue; }
+
+                                byte[] data = new byte[info.size];
+                                outBuf.position(info.offset);
+                                outBuf.get(data);
+                                encoder.releaseOutputBuffer(outIndex, false);
+
+                                // Protocolo: 4 bytes longitud + 1 byte flags + datos
+                                byte flags = (byte)((info.flags & MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0 ? 1 : 0);
+                                int len = data.length;
+                                byte[] header = {
+                                    (byte)(len>>24),(byte)(len>>16),(byte)(len>>8),(byte)len,
+                                    flags
+                                };
+                                out.write(header);
+                                out.write(data);
+                                out.flush();
+                            }
+                        } catch (Exception ignored) {}
+                    }, "EncoderReader").start();
+
+                    // Loop principal
+                    while (streaming && !client.isClosed()) {
                         if (switchRequested) {
                             switchRequested = false;
                             currentCameraIndex = (currentCameraIndex + 1) % cameraIds.length;
-                            rotHolder[0] = getSensorRotation(currentCameraIndex);
-                            closeCameraResources();
-                            // Re-init ImageReader para nueva cámara
-                            ImageReader newReader = ImageReader.newInstance(WIDTH, HEIGHT, ImageFormat.JPEG, 2);
-                            activeReader = newReader;
-                            newReader.setOnImageAvailableListener(reader -> {
-                                android.media.Image image = reader.acquireLatestImage();
-                                if (image == null) return;
-                                try {
-                                    if (!videoActive) { image.close(); return; }
-                                    ByteBuffer buffer = image.getPlanes()[0].getBuffer();
-                                    byte[] bytes = new byte[buffer.remaining()];
-                                    buffer.get(bytes);
-                                    if (rotHolder[0] != 0) bytes = rotateJpeg(bytes, rotHolder[0]);
-                                    OutputStream out = outHolder[0];
-                                    if (out == null) return;
-                                    int len = bytes.length;
-                                    byte[] header = new byte[]{
-                                        (byte)(len>>24),(byte)(len>>16),(byte)(len>>8),(byte)len};
-                                    out.write(header);
-                                    out.write(bytes);
-                                    out.flush();
-                                } catch (Exception e) { outHolder[0] = null; }
-                                finally { image.close(); }
-                            }, bgHandler);
+                            closeCameraAndEncoder();
                             Thread.sleep(400);
-                            openCamera(bgHandler);
+                            MediaCodec newEnc = createH264Encoder();
+                            if (newEnc == null) break;
+                            videoEncoder = newEnc;
+                            Surface newSurface = newEnc.createInputSurface();
+                            encoderSurface = newSurface;
+                            newEnc.start();
+                            requestKeyFrame(newEnc);
+                            openCamera(newSurface, bgHandler);
                         }
                         Thread.sleep(50);
                     }
                 } catch (Exception ignored) {
                 } finally {
-                    closeCameraResources();
+                    closeCameraAndEncoder();
                     try { if (bgThread != null) { bgThread.quitSafely(); bgThread.join(500); } } catch (Exception ignored) {}
                     try { if (client != null) client.close(); } catch (Exception ignored) {}
-                    try { if (ss != null) ss.close(); } catch (Exception ignored) {}
+                    try { if (ss != null)     ss.close();     } catch (Exception ignored) {}
                     if (streaming) try { Thread.sleep(100); } catch (InterruptedException e) { break; }
                 }
             }
         }, "VideoServer").start();
     }
 
-    private void openCamera(Handler bgHandler) {
+    private MediaCodec createH264Encoder() {
+        try {
+            MediaCodec encoder = MediaCodec.createEncoderByType("video/avc");
+            MediaFormat format = MediaFormat.createVideoFormat("video/avc", WIDTH, HEIGHT);
+            format.setInteger(MediaFormat.KEY_COLOR_FORMAT,
+                    MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface);
+            format.setInteger(MediaFormat.KEY_BIT_RATE, BITRATE);
+            format.setInteger(MediaFormat.KEY_FRAME_RATE, FPS);
+            format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1);
+            format.setInteger(MediaFormat.KEY_BITRATE_MODE,
+                    MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR);
+            // Baja latencia
+            try { format.setInteger("latency", 0); } catch (Exception ignored) {}
+            encoder.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
+            return encoder;
+        } catch (Exception e) { return null; }
+    }
+
+    private void requestKeyFrame(MediaCodec encoder) {
+        try {
+            Bundle params = new Bundle();
+            params.putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0);
+            encoder.setParameters(params);
+        } catch (Exception ignored) {}
+    }
+
+    private void openCamera(Surface targetSurface, Handler bgHandler) {
         CameraManager manager = (CameraManager) getSystemService(CAMERA_SERVICE);
         final Object lock = new Object();
         try {
@@ -372,16 +410,21 @@ public class StreamService extends Service {
                 @Override public void onOpened(CameraDevice camera) {
                     activeCamera = camera;
                     try {
-                        SurfaceTexture texture = new SurfaceTexture(0);
-                        texture.setDefaultBufferSize(WIDTH, HEIGHT);
-                        Surface dummy = new Surface(texture);
-                        Surface readerSurface = activeReader.getSurface();
-                        CaptureRequest.Builder builder = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW);
-                        builder.addTarget(readerSurface);
+                        // Surface dummy para preview (requerido por Camera2)
+                        SurfaceTexture dummy = new SurfaceTexture(0);
+                        dummy.setDefaultBufferSize(WIDTH, HEIGHT);
+                        Surface dummySurface = new Surface(dummy);
+
+                        CaptureRequest.Builder builder = camera.createCaptureRequest(
+                                CameraDevice.TEMPLATE_RECORD); // RECORD para video
+                        builder.addTarget(targetSurface); // Zero-Copy: camera → encoder directo
                         builder.set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO);
                         builder.set(CaptureRequest.CONTROL_AE_MODE, CameraMetadata.CONTROL_AE_MODE_ON);
                         builder.set(CaptureRequest.CONTROL_AWB_MODE, CameraMetadata.CONTROL_AWB_MODE_AUTO);
-                        camera.createCaptureSession(Arrays.asList(dummy, readerSurface),
+                        builder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE,
+                                new android.util.Range<>(FPS, FPS));
+
+                        camera.createCaptureSession(Arrays.asList(dummySurface, targetSurface),
                                 new CameraCaptureSession.StateCallback() {
                                     @Override public void onConfigured(CameraCaptureSession session) {
                                         activeSession = session;
@@ -396,36 +439,16 @@ public class StreamService extends Service {
                                 }, bgHandler);
                     } catch (Exception e) { synchronized (lock) { lock.notifyAll(); } }
                 }
-                @Override public void onDisconnected(CameraDevice camera) { camera.close(); activeCamera = null; synchronized (lock) { lock.notifyAll(); } }
-                @Override public void onError(CameraDevice camera, int error) { camera.close(); activeCamera = null; synchronized (lock) { lock.notifyAll(); } }
+                @Override public void onDisconnected(CameraDevice camera) {
+                    camera.close(); activeCamera = null;
+                    synchronized (lock) { lock.notifyAll(); }
+                }
+                @Override public void onError(CameraDevice camera, int error) {
+                    camera.close(); activeCamera = null;
+                    synchronized (lock) { lock.notifyAll(); }
+                }
             }, bgHandler);
             synchronized (lock) { lock.wait(3000); }
         } catch (Exception ignored) {}
-    }
-
-    private int getSensorRotation(int idx) {
-        try {
-            CameraManager m = (CameraManager) getSystemService(CAMERA_SERVICE);
-            CameraCharacteristics c = m.getCameraCharacteristics(cameraIds[idx]);
-            Integer o = c.get(CameraCharacteristics.SENSOR_ORIENTATION);
-            return o != null ? o : 90;
-        } catch (Exception e) { return 90; }
-    }
-
-    private byte[] rotateJpeg(byte[] jpegBytes, int degrees) {
-        try {
-            android.graphics.BitmapFactory.Options opts = new android.graphics.BitmapFactory.Options();
-            opts.inPreferredConfig = android.graphics.Bitmap.Config.RGB_565;
-            android.graphics.Bitmap original = android.graphics.BitmapFactory.decodeByteArray(jpegBytes, 0, jpegBytes.length, opts);
-            if (original == null) return jpegBytes;
-            android.graphics.Matrix matrix = new android.graphics.Matrix();
-            matrix.postRotate(degrees);
-            android.graphics.Bitmap rotated = android.graphics.Bitmap.createBitmap(original, 0, 0, original.getWidth(), original.getHeight(), matrix, true);
-            original.recycle();
-            java.io.ByteArrayOutputStream baos = new java.io.ByteArrayOutputStream();
-            rotated.compress(android.graphics.Bitmap.CompressFormat.JPEG, 85, baos);
-            rotated.recycle();
-            return baos.toByteArray();
-        } catch (Exception e) { return jpegBytes; }
     }
 }

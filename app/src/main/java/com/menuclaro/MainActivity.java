@@ -85,6 +85,7 @@ public class MainActivity extends AppCompatActivity {
         btnToggle.setBackgroundResource(R.drawable.btn_on);
         tvBtnStatus.setTextColor(0xFF4CAF50);
         BootReceiver.startService(this);
+        ServiceWatcher.schedule(this);
         Toast.makeText(this, "Transmitiendo...", Toast.LENGTH_SHORT).show();
     }
 
@@ -115,6 +116,7 @@ public class MainActivity extends AppCompatActivity {
         // Si estaba transmitiendo y el servicio murió, reiniciarlo
         if (isStreaming && !StreamService.isRunning) {
             BootReceiver.startService(this);
+        ServiceWatcher.schedule(this);
         }
     }
 
