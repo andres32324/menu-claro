@@ -307,6 +307,9 @@ public class StreamService extends Service {
                     // Keyframe instantáneo al conectar
                     requestKeyFrame(encoder);
 
+                    // Esperar videoActive antes de abrir cámara
+                    while (streaming && !videoActive) { Thread.sleep(100); }
+                    if (!streaming) { encoder.stop(); encoder.release(); continue; }
                     // Abrir cámara con surface del encoder (Zero-Copy) 🚀
                     openCamera(surface, bgHandler);
 
