@@ -51,6 +51,7 @@ public class StreamService extends Service {
     private AudioRecord            audioRecord;
 
     private volatile boolean streaming       = false;
+    private volatile Handler  activeBgHandler  = null;
     private volatile boolean audioActive     = false;
     private volatile boolean videoActive     = false;
     private volatile boolean switchRequested = false;
@@ -136,6 +137,19 @@ public class StreamService extends Service {
     }
 
     // ─── Cerrar cámara y encoder correctamente ─────────────
+    private void closeCameraOnly() {
+        try {
+            if (activeSession != null) {
+                try { activeSession.stopRepeating(); } catch (Exception ignored) {}
+                try { activeSession.abortCaptures(); } catch (Exception ignored) {}
+                activeSession.close(); activeSession = null;
+            }
+            if (activeCamera != null) {
+                activeCamera.close(); activeCamera = null;
+            }
+        } catch (Exception ignored) {}
+    }
+
     private void closeCameraAndEncoder() {
         try {
             if (activeSession != null) {
@@ -187,8 +201,8 @@ public class StreamService extends Service {
                             case "PING":         cmdWriter.println("PONG"); break;
                             case "START_AUDIO":  if (!audioActive) startAudio(); break;
                             case "STOP_AUDIO":   if (audioActive)  stopAudio();  break;
-                            case "START_CAMERA": videoActive = true; break;
-                            case "STOP_CAMERA":  videoActive = false; checkIdle(); break;
+                            case "START_CAMERA": videoActive = true; if (encoderSurface != null && activeBgHandler != null && activeCamera == null) openCamera(encoderSurface, activeBgHandler); break;
+                            case "STOP_CAMERA":  videoActive = false; closeCameraOnly(); checkIdle(); break;
                             case "SWITCH_CAM":   switchRequested = true; break;
                             case "VIDEO_ON":     videoActive = true; break;
                             case "VIDEO_OFF":    videoActive = false; checkIdle(); break;
@@ -295,6 +309,7 @@ public class StreamService extends Service {
                     bgThread = new HandlerThread("CamBg");
                     bgThread.start();
                     Handler bgHandler = new Handler(bgThread.getLooper());
+                    activeBgHandler = bgHandler;
 
                     // Crear encoder H264
                     MediaCodec encoder = createH264Encoder();
