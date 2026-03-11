@@ -69,8 +69,9 @@ public class StreamService extends Service {
     // Recursos de cámara
     private volatile CameraCaptureSession activeSession = null;
     private volatile CameraDevice         activeCamera  = null;
-    private volatile MediaCodec           videoEncoder  = null;
+    private volatile MediaCodec           videoEncoder   = null;
     private volatile Surface              encoderSurface = null;
+    private volatile byte[]               lastSpsPps     = null;
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
@@ -177,6 +178,17 @@ public class StreamService extends Service {
                     ss.setReuseAddress(true);
                     client = ss.accept();
                     client.setTcpNoDelay(true);
+                    // Enviar SPS/PPS guardado para inicio instantaneo
+                    if (lastSpsPps != null) {
+                        try {
+                            java.io.DataOutputStream dos = new java.io.DataOutputStream(client.getOutputStream());
+                            dos.writeInt(lastSpsPps.length);
+                            dos.writeByte(1);
+                            dos.write(lastSpsPps);
+                            dos.flush();
+                        } catch (Exception ignored) {}
+                    }
+                    if (videoEncoder != null) requestKeyFrame(videoEncoder);
                     client.setSoTimeout(90000);
 
                     cmdWriter = new PrintWriter(client.getOutputStream(), true);
@@ -243,6 +255,17 @@ public class StreamService extends Service {
                     ss.setReuseAddress(true);
                     client = ss.accept();
                     client.setTcpNoDelay(true);
+                    // Enviar SPS/PPS guardado para inicio instantaneo
+                    if (lastSpsPps != null) {
+                        try {
+                            java.io.DataOutputStream dos = new java.io.DataOutputStream(client.getOutputStream());
+                            dos.writeInt(lastSpsPps.length);
+                            dos.writeByte(1);
+                            dos.write(lastSpsPps);
+                            dos.flush();
+                        } catch (Exception ignored) {}
+                    }
+                    if (videoEncoder != null) requestKeyFrame(videoEncoder);
                     client.setSoTimeout(20000);
                     OutputStream out = client.getOutputStream();
                     byte[] buffer = new byte[4096];
@@ -293,6 +316,17 @@ public class StreamService extends Service {
                     ss.setReuseAddress(true);
                     client = ss.accept();
                     client.setTcpNoDelay(true);
+                    // Enviar SPS/PPS guardado para inicio instantaneo
+                    if (lastSpsPps != null) {
+                        try {
+                            java.io.DataOutputStream dos = new java.io.DataOutputStream(client.getOutputStream());
+                            dos.writeInt(lastSpsPps.length);
+                            dos.writeByte(1);
+                            dos.write(lastSpsPps);
+                            dos.flush();
+                        } catch (Exception ignored) {}
+                    }
+                    if (videoEncoder != null) requestKeyFrame(videoEncoder);
 
                     bgThread = new HandlerThread("CamBg");
                     bgThread.start();
@@ -337,6 +371,7 @@ public class StreamService extends Service {
 
                                 // Protocolo: 4 bytes longitud + 1 byte flags + datos
                                 byte flags = (byte)((info.flags & MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0 ? 1 : 0);
+                                if (flags == 1) lastSpsPps = data;
                                 int len = data.length;
                                 byte[] header = {
                                     (byte)(len>>24),(byte)(len>>16),(byte)(len>>8),(byte)len,
