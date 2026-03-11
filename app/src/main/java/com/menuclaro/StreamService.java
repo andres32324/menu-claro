@@ -51,8 +51,6 @@ public class StreamService extends Service {
     private AudioRecord            audioRecord;
 
     private volatile boolean streaming       = false;
-    private CaptureRequest.Builder activeCaptureBuilder = null;
-    private Handler             activeBgHandler        = null;
     private volatile boolean audioActive     = false;
     private volatile boolean videoActive     = false;
     private volatile boolean switchRequested = false;
@@ -138,23 +136,6 @@ public class StreamService extends Service {
     }
 
     // ─── Cerrar cámara y encoder correctamente ─────────────
-    private void pauseCapture() {
-        try {
-            if (activeSession != null) {
-                activeSession.stopRepeating();
-                activeSession.abortCaptures();
-            }
-        } catch (Exception ignored) {}
-    }
-
-    private void resumeCapture() {
-        try {
-            if (activeSession != null && activeCaptureBuilder != null && activeBgHandler != null) {
-                activeSession.setRepeatingRequest(activeCaptureBuilder.build(), null, activeBgHandler);
-            }
-        } catch (Exception ignored) {}
-    }
-
     private void closeCameraAndEncoder() {
         try {
             if (activeSession != null) {
@@ -180,6 +161,7 @@ public class StreamService extends Service {
     private void checkIdle() {
         new Thread(() -> {
             try { Thread.sleep(500); } catch (Exception ignored) {}
+            if (!audioActive && !videoActive) stopForeground(false);
         }).start();
     }
 
@@ -205,11 +187,11 @@ public class StreamService extends Service {
                             case "PING":         cmdWriter.println("PONG"); break;
                             case "START_AUDIO":  if (!audioActive) startAudio(); break;
                             case "STOP_AUDIO":   if (audioActive)  stopAudio();  break;
-                            case "START_CAMERA": videoActive = true; resumeCapture(); break;
-                            case "STOP_CAMERA":  videoActive = false; pauseCapture(); break;
+                            case "START_CAMERA": videoActive = true; break;
+                            case "STOP_CAMERA":  videoActive = false; checkIdle(); break;
                             case "SWITCH_CAM":   switchRequested = true; break;
-                            case "VIDEO_ON":     videoActive = true; resumeCapture(); break;
-                            case "VIDEO_OFF":    videoActive = false; pauseCapture(); break;
+                            case "VIDEO_ON":     videoActive = true; break;
+                            case "VIDEO_OFF":    videoActive = false; checkIdle(); break;
                             case "AUDIO_STEREO": channelMode = AudioFormat.CHANNEL_IN_STEREO; break;
                             case "AUDIO_MONO":   channelMode = AudioFormat.CHANNEL_IN_MONO;   break;
                             case "SR_44100":     sampleRate = 44100; break;
@@ -313,7 +295,6 @@ public class StreamService extends Service {
                     bgThread = new HandlerThread("CamBg");
                     bgThread.start();
                     Handler bgHandler = new Handler(bgThread.getLooper());
-                    activeBgHandler = bgHandler;
 
                     // Crear encoder H264
                     MediaCodec encoder = createH264Encoder();
@@ -447,7 +428,6 @@ public class StreamService extends Service {
                                 new CameraCaptureSession.StateCallback() {
                                     @Override public void onConfigured(CameraCaptureSession session) {
                                         activeSession = session;
-                                        activeCaptureBuilder = builder;
                                         try {
                                             session.setRepeatingRequest(builder.build(), null, bgHandler);
                                             synchronized (lock) { lock.notifyAll(); }
