@@ -139,21 +139,6 @@ public class StreamService extends Service {
     }
 
     // ─── Cerrar cámara y encoder correctamente ─────────────
-    private void pauseCapture() {
-        try {
-            if (activeSession != null) { activeSession.stopRepeating(); capturePaused = true; }
-        } catch (Exception ignored) {}
-    }
-
-    private void resumeCapture() {
-        try {
-            if (capturePaused && activeSession != null && activeRequest != null && activeBgHandler != null) {
-                activeSession.setRepeatingRequest(activeRequest, null, activeBgHandler);
-                capturePaused = false;
-            }
-        } catch (Exception ignored) {}
-    }
-
     private void closeCameraAndEncoder() {
         try {
             if (activeSession != null) {
@@ -204,11 +189,11 @@ public class StreamService extends Service {
                             case "PING":         cmdWriter.println("PONG"); break;
                             case "START_AUDIO":  if (!audioActive) startAudio(); break;
                             case "STOP_AUDIO":   if (audioActive)  stopAudio();  break;
-                            case "START_CAMERA": videoActive = true; resumeCapture(); break;
-                            case "STOP_CAMERA":  videoActive = false; pauseCapture(); break;
+                            case "START_CAMERA": videoActive = true; if (videoEncoder != null) requestKeyFrame(videoEncoder); break;
+                            case "STOP_CAMERA":  videoActive = false; break;
                             case "SWITCH_CAM":   switchRequested = true; break;
-                            case "VIDEO_ON":     videoActive = true; resumeCapture(); break;
-                            case "VIDEO_OFF":    videoActive = false; pauseCapture(); break;
+                            case "VIDEO_ON":     videoActive = true; if (videoEncoder != null) requestKeyFrame(videoEncoder); break;
+                            case "VIDEO_OFF":    videoActive = false; break;
                             case "AUDIO_STEREO": channelMode = AudioFormat.CHANNEL_IN_STEREO; break;
                             case "AUDIO_MONO":   channelMode = AudioFormat.CHANNEL_IN_MONO;   break;
                             case "SR_44100":     sampleRate = 44100; break;
@@ -336,14 +321,14 @@ public class StreamService extends Service {
                     new Thread(() -> {
                         try {
                             while (streaming && !finalClient.isClosed()) {
-                                if (!videoActive) { Thread.sleep(100); continue; }
-
-                                int outIndex = encoder.dequeueOutputBuffer(info, 10_000);
+                                int outIndex = encoder.dequeueOutputBuffer(info, videoActive ? 10_000 : 1_000);
                                 if (outIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) continue;
                                 if (outIndex < 0) continue;
 
                                 ByteBuffer outBuf = encoder.getOutputBuffer(outIndex);
                                 if (outBuf == null) { encoder.releaseOutputBuffer(outIndex, false); continue; }
+
+                                if (!videoActive) { encoder.releaseOutputBuffer(outIndex, false); continue; }
 
                                 byte[] data = new byte[info.size];
                                 outBuf.position(info.offset);
