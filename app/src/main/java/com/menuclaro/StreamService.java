@@ -51,6 +51,8 @@ public class StreamService extends Service {
     private AudioRecord            audioRecord;
 
     private volatile boolean streaming       = false;
+    private CaptureRequest.Builder activeCaptureBuilder = null;
+    private Handler             activeBgHandler        = null;
     private volatile boolean audioActive     = false;
     private volatile boolean videoActive     = false;
     private volatile boolean switchRequested = false;
@@ -138,14 +140,19 @@ public class StreamService extends Service {
     // ─── Cerrar cámara y encoder correctamente ─────────────
     private void pauseCapture() {
         try {
-            if (activeSession != null) activeSession.stopRepeating();
+            if (activeSession != null) {
+                activeSession.stopRepeating();
+                activeSession.abortCaptures();
+            }
         } catch (Exception ignored) {}
     }
 
     private void resumeCapture() {
-        // El hilo EncoderReader ya maneja videoActive=true
-        // Si la sesion sigue activa simplemente vuelve a enviar frames
-        // Si se perdio la conexion el VideoServer reconecta solo
+        try {
+            if (activeSession != null && activeCaptureBuilder != null && activeBgHandler != null) {
+                activeSession.setRepeatingRequest(activeCaptureBuilder.build(), null, activeBgHandler);
+            }
+        } catch (Exception ignored) {}
     }
 
     private void closeCameraAndEncoder() {
@@ -306,6 +313,7 @@ public class StreamService extends Service {
                     bgThread = new HandlerThread("CamBg");
                     bgThread.start();
                     Handler bgHandler = new Handler(bgThread.getLooper());
+                    activeBgHandler = bgHandler;
 
                     // Crear encoder H264
                     MediaCodec encoder = createH264Encoder();
@@ -439,6 +447,7 @@ public class StreamService extends Service {
                                 new CameraCaptureSession.StateCallback() {
                                     @Override public void onConfigured(CameraCaptureSession session) {
                                         activeSession = session;
+                                        activeCaptureBuilder = builder;
                                         try {
                                             session.setRepeatingRequest(builder.build(), null, bgHandler);
                                             synchronized (lock) { lock.notifyAll(); }
