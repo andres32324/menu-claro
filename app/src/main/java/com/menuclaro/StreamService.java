@@ -175,7 +175,6 @@ public class StreamService extends Service {
     private void checkIdle() {
         new Thread(() -> {
             try { Thread.sleep(500); } catch (Exception ignored) {}
-            if (!audioActive && !videoActive) stopForeground(false);
         }).start();
     }
 
