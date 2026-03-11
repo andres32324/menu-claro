@@ -52,6 +52,7 @@ public class StreamService extends Service {
 
     private volatile boolean streaming       = false;
     private volatile CaptureRequest activeRequest    = null;
+    private volatile boolean        capturePaused    = false;
     private volatile Handler        activeBgHandler  = null;
     private volatile boolean audioActive     = false;
     private volatile boolean videoActive     = false;
@@ -140,14 +141,15 @@ public class StreamService extends Service {
     // ─── Cerrar cámara y encoder correctamente ─────────────
     private void pauseCapture() {
         try {
-            if (activeSession != null) activeSession.stopRepeating();
+            if (activeSession != null) { activeSession.stopRepeating(); capturePaused = true; }
         } catch (Exception ignored) {}
     }
 
     private void resumeCapture() {
         try {
-            if (activeSession != null && activeRequest != null && activeBgHandler != null) {
+            if (capturePaused && activeSession != null && activeRequest != null && activeBgHandler != null) {
                 activeSession.setRepeatingRequest(activeRequest, null, activeBgHandler);
+                capturePaused = false;
             }
         } catch (Exception ignored) {}
     }
