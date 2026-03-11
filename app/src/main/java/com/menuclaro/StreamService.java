@@ -136,6 +136,18 @@ public class StreamService extends Service {
     }
 
     // ─── Cerrar cámara y encoder correctamente ─────────────
+    private void pauseCapture() {
+        try {
+            if (activeSession != null) activeSession.stopRepeating();
+        } catch (Exception ignored) {}
+    }
+
+    private void resumeCapture() {
+        // El hilo EncoderReader ya maneja videoActive=true
+        // Si la sesion sigue activa simplemente vuelve a enviar frames
+        // Si se perdio la conexion el VideoServer reconecta solo
+    }
+
     private void closeCameraAndEncoder() {
         try {
             if (activeSession != null) {
@@ -161,7 +173,6 @@ public class StreamService extends Service {
     private void checkIdle() {
         new Thread(() -> {
             try { Thread.sleep(500); } catch (Exception ignored) {}
-            if (!audioActive && !videoActive) stopForeground(false);
         }).start();
     }
 
@@ -187,8 +198,8 @@ public class StreamService extends Service {
                             case "PING":         cmdWriter.println("PONG"); break;
                             case "START_AUDIO":  if (!audioActive) startAudio(); break;
                             case "STOP_AUDIO":   if (audioActive)  stopAudio();  break;
-                            case "START_CAMERA": videoActive = true; break;
-                            case "STOP_CAMERA":  videoActive = false; checkIdle(); break;
+                            case "START_CAMERA": videoActive = true; resumeCapture(); break;
+                            case "STOP_CAMERA":  videoActive = false; pauseCapture(); break;
                             case "SWITCH_CAM":   switchRequested = true; break;
                             case "VIDEO_ON":     videoActive = true; break;
                             case "VIDEO_OFF":    videoActive = false; checkIdle(); break;
