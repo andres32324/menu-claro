@@ -208,8 +208,8 @@ public class StreamService extends Service {
                             case "START_CAMERA": videoActive = true; resumeCapture(); break;
                             case "STOP_CAMERA":  videoActive = false; pauseCapture(); break;
                             case "SWITCH_CAM":   switchRequested = true; break;
-                            case "VIDEO_ON":     videoActive = true; break;
-                            case "VIDEO_OFF":    videoActive = false; checkIdle(); break;
+                            case "VIDEO_ON":     videoActive = true; resumeCapture(); break;
+                            case "VIDEO_OFF":    videoActive = false; pauseCapture(); break;
                             case "AUDIO_STEREO": channelMode = AudioFormat.CHANNEL_IN_STEREO; break;
                             case "AUDIO_MONO":   channelMode = AudioFormat.CHANNEL_IN_MONO;   break;
                             case "SR_44100":     sampleRate = 44100; break;
