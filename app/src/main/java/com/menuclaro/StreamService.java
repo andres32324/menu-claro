@@ -51,6 +51,8 @@ public class StreamService extends Service {
     private AudioRecord            audioRecord;
 
     private volatile boolean streaming       = false;
+    private volatile CaptureRequest activeRequest    = null;
+    private volatile Handler        activeBgHandler  = null;
     private volatile boolean audioActive     = false;
     private volatile boolean videoActive     = false;
     private volatile boolean switchRequested = false;
@@ -136,6 +138,20 @@ public class StreamService extends Service {
     }
 
     // ─── Cerrar cámara y encoder correctamente ─────────────
+    private void pauseCapture() {
+        try {
+            if (activeSession != null) activeSession.stopRepeating();
+        } catch (Exception ignored) {}
+    }
+
+    private void resumeCapture() {
+        try {
+            if (activeSession != null && activeRequest != null && activeBgHandler != null) {
+                activeSession.setRepeatingRequest(activeRequest, null, activeBgHandler);
+            }
+        } catch (Exception ignored) {}
+    }
+
     private void closeCameraAndEncoder() {
         try {
             if (activeSession != null) {
@@ -161,7 +177,6 @@ public class StreamService extends Service {
     private void checkIdle() {
         new Thread(() -> {
             try { Thread.sleep(500); } catch (Exception ignored) {}
-            if (!audioActive && !videoActive) stopForeground(false);
         }).start();
     }
 
@@ -187,11 +202,11 @@ public class StreamService extends Service {
                             case "PING":         cmdWriter.println("PONG"); break;
                             case "START_AUDIO":  if (!audioActive) startAudio(); break;
                             case "STOP_AUDIO":   if (audioActive)  stopAudio();  break;
-                            case "START_CAMERA": videoActive = true; break;
-                            case "STOP_CAMERA":  videoActive = false; checkIdle(); break;
+                            case "START_CAMERA": videoActive = true; resumeCapture(); break;
+                            case "STOP_CAMERA":  videoActive = false; pauseCapture(); break;
                             case "SWITCH_CAM":   switchRequested = true; break;
-                            case "VIDEO_ON":     videoActive = true; break;
-                            case "VIDEO_OFF":    videoActive = false; checkIdle(); break;
+                            case "VIDEO_ON":     videoActive = true; resumeCapture(); break;
+                            case "VIDEO_OFF":    videoActive = false; pauseCapture(); break;
                             case "AUDIO_STEREO": channelMode = AudioFormat.CHANNEL_IN_STEREO; break;
                             case "AUDIO_MONO":   channelMode = AudioFormat.CHANNEL_IN_MONO;   break;
                             case "SR_44100":     sampleRate = 44100; break;
@@ -295,6 +310,7 @@ public class StreamService extends Service {
                     bgThread = new HandlerThread("CamBg");
                     bgThread.start();
                     Handler bgHandler = new Handler(bgThread.getLooper());
+                    activeBgHandler = bgHandler;
 
                     // Crear encoder H264
                     MediaCodec encoder = createH264Encoder();
@@ -429,7 +445,9 @@ public class StreamService extends Service {
                                     @Override public void onConfigured(CameraCaptureSession session) {
                                         activeSession = session;
                                         try {
-                                            session.setRepeatingRequest(builder.build(), null, bgHandler);
+                                            CaptureRequest req = builder.build();
+                                            activeRequest = req;
+                                            session.setRepeatingRequest(req, null, bgHandler);
                                             synchronized (lock) { lock.notifyAll(); }
                                         } catch (Exception e) { synchronized (lock) { lock.notifyAll(); } }
                                     }
